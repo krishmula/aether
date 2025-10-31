@@ -15,9 +15,17 @@ class Broker:
         self._subs: List[Optional[Subscriber]] = [None] * 256
 
     def register(self, sub: Subscriber, sub_idx: UInt8) -> None:
+        curr_sub = self._subs[sub_idx]
+        if curr_sub is not None and curr_sub is not sub:
+            raise ValueError(f"subscriber slot {sub_idx} occupied")
         self._subs[sub_idx] = sub
 
-    def unregister(self, sub_idx: UInt8) -> None:
+    def unregister(self, sub: Subscriber, sub_idx: UInt8) -> None:
+        curr_sub = self._subs[sub_idx]
+        if curr_sub is None:
+            raise ValueError(f"subscriber slot {sub_idx} is empty")
+        if curr_sub is not sub:
+            raise ValueError(f"subscriber slot {sub_idx} bound to different subscriber")
         self._subs[sub_idx] = None
 
     def publish(self, msg: Message) -> None:
