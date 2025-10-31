@@ -1,6 +1,11 @@
 """Publisher implementation."""
+import random
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from broker import Broker
+from uint8 import UInt8
 from message import Message
-from broker import Broker
 
 
 class Publisher:
@@ -8,11 +13,12 @@ class Publisher:
 
     __slots__ = ("_broker",)
 
-    def __init__(self, broker: Broker) -> None:
+    def __init__(self, broker: "Broker") -> None:
         self._broker = broker
 
-    def _create_msg(self) -> Message:  # pragma: no cover - user defined
-        raise NotImplementedError
+    def _create_msg(self) -> Message:
+        i = random.randint(0, 255)
+        return Message(UInt8(i))
 
     def publish(self, msg: Message) -> None:
         self._broker.publish(msg)

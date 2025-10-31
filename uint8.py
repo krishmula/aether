@@ -1,5 +1,4 @@
 """Unsigned 8-bit integer value object."""
-from __future__ import annotations
 
 
 class UInt8(int):
