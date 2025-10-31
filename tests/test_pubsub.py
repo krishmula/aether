@@ -8,16 +8,6 @@ from subscriber import Subscriber
 from uint8 import UInt8
 
 
-class EvenSubscriber(Subscriber):
-    def filter(self, msg: Message) -> bool:
-        return msg.payload % 2 == 0
-
-
-class OddSubscriber(Subscriber):
-    def filter(self, msg: Message) -> bool:
-        return msg.payload % 2 == 1
-
-
 class PubSubTests(unittest.TestCase):
     def setUp(self) -> None:
         self.broker = Broker()
@@ -33,8 +23,8 @@ class PubSubTests(unittest.TestCase):
         self.assertEqual(self.broker.get_count(sub, UInt8(42)), 3)
 
     def test_selective_filters_receive_matching_payloads(self) -> None:
-        even_sub = EvenSubscriber(self.broker)
-        odd_sub = OddSubscriber(self.broker)
+        even_sub = Subscriber(self.broker, lambda msg: int(msg.payload) % 2 == 0)
+        odd_sub = Subscriber(self.broker, lambda msg: int(msg.payload) % 2 == 1)
         self.broker.register(even_sub, UInt8(0))
         self.broker.register(odd_sub, UInt8(1))
 

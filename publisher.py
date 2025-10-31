@@ -1,10 +1,10 @@
 """Publisher implementation."""
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from broker import Broker
 from message import Message
 
+if TYPE_CHECKING:   # pragma: no cover - type checking only
+    from broker import Broker
 
 class Publisher:
     """Publisher that delegates message delivery to its broker."""
