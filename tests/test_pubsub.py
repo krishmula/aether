@@ -14,8 +14,8 @@ class PubSubTests(unittest.TestCase):
         self.publisher = Publisher(self.broker)
 
     def test_single_subscriber_counts_messages(self) -> None:
-        sub = Subscriber(self.broker)
-        self.broker.register(sub, UInt8(7))
+        sub = Subscriber(self.broker, lambda _: True)
+        self.broker.register(sub, UInt8(0))
 
         for _ in range(3):
             self.publisher.publish(Message(UInt8(42)))
@@ -37,23 +37,24 @@ class PubSubTests(unittest.TestCase):
         self.assertEqual(self.broker.get_count(odd_sub, UInt8(3)), 1)
 
     def test_registering_duplicate_index_raises(self) -> None:
-        sub1 = Subscriber(self.broker)
+        sub1 = Subscriber(self.broker, lambda _: True)
         self.broker.register(sub1, UInt8(0))
+
+        sub2 = Subscriber(self.broker, lambda _: True)
         with self.assertRaises(ValueError):
-            self.broker.register(Subscriber(self.broker), UInt8(0))
+            self.broker.register(sub2, UInt8(0))
 
     def test_unregister_requires_matching_subscriber(self) -> None:
-        sub = Subscriber(self.broker)
-        other = Subscriber(self.broker)
-        self.broker.register(sub, UInt8(0))
+        sub1 = Subscriber(self.broker, lambda _: True)
+        sub2 = Subscriber(self.broker, lambda _: True)
+        self.broker.register(sub1, UInt8(0))
 
         with self.assertRaises(ValueError):
-            self.broker.unregister(other, UInt8(0))
+            self.broker.unregister(sub2, UInt8(0))
 
-        self.broker.unregister(sub, UInt8(0))
-
-        self.publisher.publish(Message(UInt8(123)))
-        self.assertEqual(sub.counts[123], 0)
+        self.broker.unregister(sub1, UInt8(0))
+        self.publisher.publish(Message(UInt8(42)))
+        self.assertEqual(sub1.counts[42], 0)
 
 
 if __name__ == "__main__":
