@@ -1,44 +1,46 @@
 """Broker implementation."""
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List, Set, Dict
 
 from uint8 import UInt8
 from message import Message
 from subscriber import Subscriber
+from payload_range import PayloadRange
+
+
+@dataclass(frozen=True)
+class Subscription:
+    broker: "Broker"
+    subscriber: "Subscriber"
 
 
 class Broker:
-    """Broker that coordinates a publisher and subscriber."""
+    """Broker that coordinates subscriptions."""
 
-    __slots__ = ("_subs",)
+    __slots__ = ("_buckets", "_subscriber_to_range",)
 
     def __init__(self) -> None:
-        self._subs: List[Optional[Subscriber]] = [None] * 256
+        self._buckets: List[Set[Subscriber]] = [set() for _ in range(256)]
+        self._subscriber_to_range: Dict[Subscriber, List[PayloadRange]] = {}
 
-    def register(self, sub: Subscriber, sub_idx: UInt8) -> None:
-        curr_sub = self._subs[sub_idx]
-        if curr_sub is not None and curr_sub is not sub:
-            raise ValueError(f"subscriber slot {sub_idx} occupied")
-        self._subs[sub_idx] = sub
+    def register(
+        self,
+        subscriber: Subscriber,
+        payload_range: PayloadRange
+    ) -> Subscription:
+        for i in range(payload_range.low, payload_range.high):
+            self._buckets[i].add(subscriber)
+        return Subscription(self, subscriber)
 
-    def unregister(self, sub: Subscriber, sub_idx: UInt8) -> None:
-        curr_sub = self._subs[sub_idx]
-        if curr_sub is None:
-            raise ValueError(f"subscriber slot {sub_idx} is empty")
-        if curr_sub is not sub:
-            raise ValueError(f"subscriber slot {sub_idx} bound to different subscriber")
-        self._subs[sub_idx] = None
+    def unregister(self, subscriber: Subscriber) -> None:
+        payload_ranges = self._subscriber_to_range.pop(subscriber, set())
+        for payload_range in payload_ranges:
+            for i in range(payload_range.low, payload_range.high + 1):
+                self._buckets[i].discard(subscriber)
 
     def publish(self, msg: Message) -> None:
-        targets = self._match(msg)
-        self._deliver(msg, targets)
-
-    def _match(self, msg: Message) -> List[Subscriber]:
-        subs_snapshot = [sub for sub in self._subs if sub is not None]
-        return [sub for sub in subs_snapshot if sub.filter(msg)]
-
-    def _deliver(self, msg: Message, targets: List[Subscriber]) -> None:
-        for sub in targets:
-            sub._handle_msg(msg)
+        for subscriber in tuple(self._buckets[msg.payload]):
+            subscriber.handle_msg(msg)
 
     def get_count(self, sub: Subscriber, content: UInt8) -> int:
         return sub.counts[content]

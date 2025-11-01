@@ -1,64 +1,70 @@
-"""Admin utility to spin up pub-sub system."""
+"""Admin utility to spin up a pub-sub system."""
 import argparse
 import random
 import threading
 import time
-from typing import List, Tuple
+from typing import List, Tuple, NamedTuple
 
 from broker import Broker
 from message import Message
+from publisher import Publisher
 from subscriber import Subscriber
 from uint8 import UInt8
+from payload_range import PayloadRange
 
 
-def partition_payload_space(num_subs: UInt8) -> List[Tuple[UInt8, UInt8]]:
+class SubscriberInfo(NamedTuple):
+    range: PayloadRange
+    subscriber: Subscriber
+
+
+def partition_payload_space(num_subs: UInt8) -> List[PayloadRange]:
     """
-    Partition 0..255 inclusive into `num_subs` intervals
+    Partition 0..255 inclusive into `num_subs` ranges.
     If the range cannot be evenly divided,
-    the remainder is added into the first interval(s).
+    the remainder is added into the first range(s).
     """
-    ivls: List[Tuple[UInt8, UInt8]] = []
+    payload_ranges: List[PayloadRange] = []
     for i in range(num_subs):
         start = (i * 256) // num_subs
         end = ((i + 1) * 256) // num_subs - 1
-        ivls.append((UInt8(start), UInt8(end)))
+        payload_ranges.append(PayloadRange(UInt8(start), UInt8(end)))
 
-    return ivls
+    return payload_ranges
 
 
-def configure_broker_and_subscribers(num_subs: UInt8) -> Broker:
+def configure_system(num_subs: UInt8, publish_interval: float):
+    """Configure a broker with a publisher and subscribers."""
     broker = Broker()
-    payload_ranges = partition_payload_space(num_subs)
+    publisher = Publisher(broker)
+    subs: List[Tuple[int, int, int, Subscriber]] = []
 
-    for i, (l, r) in enumerate(payload_ranges):
-        subscriber = Subscriber(
-            broker,
-            lambda msg, l=l, r=r: l <= msg.payload <= r,
-        )
-        broker.register(subscriber, UInt8(i))
-    return broker
+    def sub_filter_fn(msg: Message, payload_range: PayloadRange) -> bool:
+        return payload_range.low <= msg.payload <= payload_range.high
 
+    for payload_range in partition_payload_space(num_subs):
+        sub = Subscriber(broker, sub_filter_fn)
+        broker.register(sub, UInt8(idx))
+        subs.append((idx, l, r, sub))
 
-def start_publisher(broker: Broker, seconds: float) -> threading.Thread:
-    """
-    Launch a publisher emitting payloads at the given interval length,
-    specified by `seconds`.
-    """
+    stop_event = threading.Event()
 
-    def run() -> None:
-        while True:
+    def run_publisher() -> None:
+        while not stop_event.is_set():
             payload = UInt8(random.randint(0, 255))
-            broker.publish(Message(payload))
-            time.sleep(seconds)
+            publisher.publish(Message(payload))
+            stop_event.wait(publish_interval)
 
-    thread = threading.Thread(target=run, name="publisher", daemon=True)
+    thread = threading.Thread(
+        target=run_publisher, name="publisher", daemon=True
+    )
     thread.start()
-    return thread
+    return broker, subs, stop_event, thread
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Configure broker and subscribers")
-    parser.add_argument("subscribers", type=int, help="Number of subscribers (1..256)")
+    parser = argparse.ArgumentParser(description="Configure broker, publisher, and subscribers")
+    parser.add_argument("subscribers", type=int, help="Number of subscribers within the range 1 to 256 inclusive")
     parser.add_argument(
         "--publish-interval",
         type=float,
@@ -73,23 +79,38 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    broker = configure_broker(args.subscribers)
-    start_publisher(broker, args.publish_interval)
+    broker, subscribers, stop_event, thread = configure_system(
+        args.subscribers, args.publish_interval
+    )
     print(f"Configured broker with {args.subscribers} subscribers")
-    for i, sub in enumerate(broker._subs):  # noqa: SLF001 - introspection for admin view
-        if sub is None:
-            continue
-        print(f"Slot {i:3d}: counts sum={sum(sub.counts)}")
 
     print("Publisher running; press Ctrl+C to stop.")
+    time.sleep(args.publish_interval / 2)
     try:
         if args.duration is None:
             while True:
-                time.sleep(1)
+                for i, l, r, sub in subscribers:
+                    print(
+                        f"Slot {i:3d}: payload [{l}, {r}] "
+                        f"counts sum={sum(sub.counts)}"
+                    )
+                print("---")
+                time.sleep(args.publish_interval)
         else:
-            time.sleep(args.duration)
+            end_time = time.time() + args.duration
+            while time.time() < end_time:
+                for i, l, r, sub in subscribers:
+                    print(
+                        f"Slot {i:3d}: payload [{l}, {r}] "
+                        f"counts sum={sum(sub.counts)}"
+                    )
+                print("---")
+                time.sleep(args.publish_interval)
     except KeyboardInterrupt:
         print("\nShutting down.")
+    finally:
+        stop_event.set()
+        thread.join(timeout=1.0)
 
 
 if __name__ == "__main__":
