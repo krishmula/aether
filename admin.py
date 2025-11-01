@@ -3,18 +3,20 @@ import argparse
 import random
 import threading
 import time
-from typing import List, Tuple, NamedTuple
+from dataclasses import dataclass
+from typing import List, Tuple
 
 from broker import Broker
 from message import Message
+from payload_range import PayloadRange
 from publisher import Publisher
 from subscriber import Subscriber
 from uint8 import UInt8
-from payload_range import PayloadRange
 
 
-class SubscriberInfo(NamedTuple):
-    range: PayloadRange
+@dataclass(frozen=True)
+class SubscriberInfo:
+    payload_range: PayloadRange
     subscriber: Subscriber
 
 
@@ -33,19 +35,22 @@ def partition_payload_space(num_subs: UInt8) -> List[PayloadRange]:
     return payload_ranges
 
 
-def configure_system(num_subs: UInt8, publish_interval: float):
-    """Configure a broker with a publisher and subscribers."""
+def launch_system(
+    sub_count: UInt8,
+    publish_interval: float
+) -> Tuple[Broker, List[SubscriberInfo], threading.Event, threading.Thread]:
+    """
+    Configure the broker and its subscribers.
+    Start the publisher thread.
+    """
     broker = Broker()
     publisher = Publisher(broker)
-    subs: List[Tuple[int, int, int, Subscriber]] = []
 
-    def sub_filter_fn(msg: Message, payload_range: PayloadRange) -> bool:
-        return payload_range.low <= msg.payload <= payload_range.high
-
-    for payload_range in partition_payload_space(num_subs):
-        sub = Subscriber(broker, sub_filter_fn)
-        broker.register(sub, UInt8(idx))
-        subs.append((idx, l, r, sub))
+    subscriber_info_list: List[SubscriberInfo] = []
+    for payload_range in partition_payload_space(sub_count):
+        subscriber = Subscriber()
+        broker.register(subscriber, payload_range)
+        subscriber_info_list.append(SubscriberInfo(payload_range, subscriber))
 
     stop_event = threading.Event()
 
@@ -59,15 +64,32 @@ def configure_system(num_subs: UInt8, publish_interval: float):
         target=run_publisher, name="publisher", daemon=True
     )
     thread.start()
-    return broker, subs, stop_event, thread
+    return broker, subscriber_info_list, stop_event, thread
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Configure broker, publisher, and subscribers")
-    parser.add_argument("subscribers", type=int, help="Number of subscribers within the range 1 to 256 inclusive")
+
+    def unsigned_float(x: str) -> float:
+        v = float(x)
+        if v < 0:
+            raise argparse.ArgumentTypeError("must be >= 0")
+        return v
+
+    def unsigned_byte_int(x: str) -> int:
+        v = int(x)
+        if not 1 <= v <= 256:
+            raise argparse.ArgumentTypeError("must be within 1 to 256 inclusive")
+        return v
+
+    parser = argparse.ArgumentParser(description="Configure pub-sub system")
+    parser.add_argument(
+        "subscribers",
+        type=unsigned_byte_int,
+        help="Number of subscribers within the range 1 to 256 inclusive"
+    )
     parser.add_argument(
         "--publish-interval",
-        type=float,
+        type=unsigned_float,
         default=1.0,
         help="Seconds between random publishes (default: 1.0)",
     )
@@ -77,10 +99,19 @@ def main() -> None:
         default=None,
         help="Optional duration in seconds to run before exiting.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional random seed for reproducible publishes.",
+    )
     args = parser.parse_args()
 
-    broker, subscribers, stop_event, thread = configure_system(
-        args.subscribers, args.publish_interval
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    broker, subscriber_info_list, stop_event, thread = launch_system(
+        UInt8(args.subscribers), args.publish_interval
     )
     print(f"Configured broker with {args.subscribers} subscribers")
 
@@ -89,9 +120,12 @@ def main() -> None:
     try:
         if args.duration is None:
             while True:
-                for i, l, r, sub in subscribers:
+                for i, subscriber_info in enumerate(subscriber_info_list):
+                    pr = subscriber_info.payload_range
+                    sub = subscriber_info.subscriber
                     print(
-                        f"Slot {i:3d}: payload [{l}, {r}] "
+                        f"Subscriber {i:3d}: "
+                        f"payload [{pr.low}, {pr.high}] "
                         f"counts sum={sum(sub.counts)}"
                     )
                 print("---")
@@ -99,9 +133,12 @@ def main() -> None:
         else:
             end_time = time.time() + args.duration
             while time.time() < end_time:
-                for i, l, r, sub in subscribers:
+                for i, subscriber_info in enumerate(subscriber_info_list):
+                    pr = subscriber_info.payload_range
+                    sub = subscriber_info.subscriber
                     print(
-                        f"Slot {i:3d}: payload [{l}, {r}] "
+                        f"Subscriber {i:3d}: "
+                        f"payload [{int(pr.low)}, {int(pr.high)}] "
                         f"counts sum={sum(sub.counts)}"
                     )
                 print("---")
