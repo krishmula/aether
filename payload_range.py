@@ -8,7 +8,7 @@ class PayloadRange:
     low: UInt8
     high: UInt8
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.low > self.high:
             raise ValueError(f"PayloadRange low={self.low} > high={self.high}")
 
