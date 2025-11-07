@@ -37,7 +37,7 @@ class Broker:
     def unregister(self, subscriber: Subscriber) -> None:
         payload_ranges = self._subscriber_to_range.pop(subscriber, [])
         for payload_range in payload_ranges:
-            for i in range(int(payload_range.low), int(payload_range.high) + 1):
+            for i in range(payload_range.low, payload_range.high + 1):
                 self._buckets[i].discard(subscriber)
 
     def publish(self, msg: Message) -> None:

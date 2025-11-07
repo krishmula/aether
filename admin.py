@@ -77,15 +77,15 @@ def main() -> None:
 
     def unsigned_byte_int(x: str) -> int:
         v = int(x)
-        if not 1 <= v <= 256:
-            raise argparse.ArgumentTypeError("must be within 1 to 256 inclusive")
+        if not 0 <= v <= 255:
+            raise argparse.ArgumentTypeError("must be within 0 to 255 inclusive")
         return v
 
     parser = argparse.ArgumentParser(description="Configure pub-sub system")
     parser.add_argument(
         "subscribers",
         type=unsigned_byte_int,
-        help="Number of subscribers within the range 1 to 256 inclusive"
+        help="Number of subscribers within the range 0 to 255 inclusive"
     )
     parser.add_argument(
         "--publish-interval",
@@ -95,7 +95,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--duration",
-        type=float,
+        type=unsigned_float,
         default=None,
         help="Optional duration in seconds to run before exiting.",
     )
@@ -115,33 +115,28 @@ def main() -> None:
     )
     print(f"Configured broker with {args.subscribers} subscribers")
 
+    def print_subscriber_stats(subscriber_info_list: List[SubscriberInfo]) -> None:
+        for i, subscriber_info in enumerate(subscriber_info_list):
+            pr = subscriber_info.payload_range
+            sub = subscriber_info.subscriber
+            print(
+                f"Subscriber {i:3d}: "
+                f"payload [{int(pr.low)}, {int(pr.high)}] "
+                f"counts sum={sum(sub.counts)}"
+            )
+        print("---")
+
     print("Publisher running; press Ctrl+C to stop.")
     time.sleep(args.publish_interval / 2)
     try:
         if args.duration is None:
             while True:
-                for i, subscriber_info in enumerate(subscriber_info_list):
-                    pr = subscriber_info.payload_range
-                    sub = subscriber_info.subscriber
-                    print(
-                        f"Subscriber {i:3d}: "
-                        f"payload [{pr.low}, {pr.high}] "
-                        f"counts sum={sum(sub.counts)}"
-                    )
-                print("---")
+                print_subscriber_stats(subscriber_info_list)
                 time.sleep(args.publish_interval)
         else:
             end_time = time.time() + args.duration
             while time.time() < end_time:
-                for i, subscriber_info in enumerate(subscriber_info_list):
-                    pr = subscriber_info.payload_range
-                    sub = subscriber_info.subscriber
-                    print(
-                        f"Subscriber {i:3d}: "
-                        f"payload [{int(pr.low)}, {int(pr.high)}] "
-                        f"counts sum={sum(sub.counts)}"
-                    )
-                print("---")
+                print_subscriber_stats(subscriber_info_list)
                 time.sleep(args.publish_interval)
     except KeyboardInterrupt:
         print("\nShutting down.")
