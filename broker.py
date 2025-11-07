@@ -45,4 +45,4 @@ class Broker:
             subscriber.handle_msg(msg)
 
     def get_count(self, sub: Subscriber, content: UInt8) -> int:
-        return sub.counts[content]
+        return sub.counts.get(content, 0)
