@@ -1,1 +1,13 @@
+# Ignore files without extensions (for temporary diff output or notes)
+*
+!*/
+!*.*
+
+# Ignore references and ideas folders (for the project spec sheet and proposal)
+ref/
 .idea/
+
+# Ignore Python caches and bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
