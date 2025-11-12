@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-## This file will contain logic that generates random integers, and sends them to the broker via TCP sockets.
-=======
 """Publisher implementation."""
 from typing import TYPE_CHECKING
 
@@ -19,4 +16,3 @@ class Publisher:
 
     def publish(self, msg: Message) -> None:
         self._broker.publish(msg)
->>>>>>> origin/kevwjin/mvp

@@ -1,0 +1,130 @@
+import argparse
+import random
+import threading
+import time
+from typing import List
+
+from bootstrap import BootstrapServer
+from gossip_broker import GossipBroker
+from message import Message
+from network import NodeAddress
+from network_publisher import NetworkPublisher
+from payload_range import PayloadRange, partition_payload_space
+from subscriber import Subscriber
+from uint8 import UInt8
+from log_utils import log_info, log_success, log_warning, log_separator, log_header, log_system, log_debug
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Distributed Gossip Pub-Sub Admin")
+    parser.add_argument(
+        "brokers", type=int, help="Number of gossip broker nodes to start"
+    )
+    parser.add_argument(
+        "subscribers_per_broker", type=int, help="Number of subscribers per broker"
+    )
+    parser.add_argument("--base-port", type=int, default=8000)
+    parser.add_argument("--publish-interval", type=float, default=1.0)
+    parser.add_argument("--duration", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=None)
+    args = parser.parse_args()
+
+    if args.seed:
+        random.seed(args.seed)
+
+    log_header("DISTRIBUTED GOSSIP PUB-SUB SYSTEM")
+
+    bootstrap_addr = NodeAddress("localhost", 7000)
+    bootstrap = BootstrapServer(bootstrap_addr)
+    bootstrap.start()
+
+
+    time.sleep(0.5)
+
+    brokers: List[GossipBroker] = []
+    all_subscribers: List[Subscriber] = []
+
+    total_subscribers = args.brokers * args.subscribers_per_broker
+    payload_ranges = partition_payload_space(UInt8(total_subscribers))
+
+    range_idx = 0
+    for broker_id in range(args.brokers):
+        broker_port = args.base_port + broker_id
+        broker_addr = NodeAddress("localhost", broker_port)
+
+        broker = GossipBroker(broker_addr, fanout=2, ttl=5)
+
+        for _ in range(args.subscribers_per_broker):
+            if range_idx >= len(payload_ranges):
+                break
+
+            pr = payload_ranges[range_idx]
+            sub = Subscriber()
+            broker.register(sub, pr)
+            all_subscribers.append(sub)
+
+            log_info(f"Broker:{broker_port}", f"Registered subscriber for range [{pr.low}-{pr.high}]")
+            range_idx += 1
+
+        # broker sends JOIN payload to the bootstrap server. receives peer list in response.
+        broker.network.send("JOIN", bootstrap_addr)
+
+        membership, _ = broker.network.receive(timeout=2.0)
+        if membership:
+            for peer_addr in membership.brokers:
+                broker.add_peer(peer_addr)
+
+        broker.start()
+        brokers.append(broker)
+
+    time.sleep(1.0)
+
+    broker_addresses = [b.address for b in brokers]
+    publisher_addr = NodeAddress("localhost", 9000)
+    publisher = NetworkPublisher(publisher_addr, broker_addresses)
+
+    log_separator("SYSTEM STATUS")
+    log_system("Configuration", f"{args.brokers} broker nodes active")
+    log_system("Configuration", f"{len(all_subscribers)} subscribers registered")
+    log_system("Configuration", f"Publisher targeting {len(broker_addresses)} brokers")
+    log_separator()
+
+    try:
+        start_time = time.time()
+        msg_count = 0
+
+        while True:
+            payload = UInt8(random.randint(0, 255))
+            publisher.publish(Message(payload))
+            msg_count += 1
+
+            if msg_count % 5 == 0:
+                log_separator(f"STATISTICS AFTER {msg_count} MESSAGES")
+                for i, sub in enumerate(all_subscribers):
+                    total = sum(sub.counts)
+                    if total > 0:
+                        log_info("Stats", f"Subscriber {i:2d}: {total:3d} messages received")
+                log_separator()
+
+            time.sleep(args.publish_interval)
+
+            if args.duration and (time.time() - start_time) > args.duration:
+                break
+
+    except KeyboardInterrupt:
+        log_warning("System", "Interrupted by user, shutting down...")
+    finally:
+        publisher.close()
+        for broker in brokers:
+            broker.stop()
+        bootstrap.stop()
+
+        log_separator("FINAL STATISTICS")
+        for i, sub in enumerate(all_subscribers):
+            total = sum(sub.counts)
+            log_success("Final", f"Subscriber {i:2d}: {total:3d} total messages")
+        log_separator()
+
+
+if __name__ == "__main__":
+    main()

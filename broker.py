@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-## maintains a registry of subscriber addresses, and their address ranges. And forwards messages to the appropriate subscribers, when they receive a publication.
-=======
 """Broker implementation."""
 from dataclasses import dataclass
 from typing import List, Set, Dict
@@ -49,4 +46,3 @@ class Broker:
 
     def get_count(self, sub: Subscriber, content: UInt8) -> int:
         return sub.counts.get(content, 0)
->>>>>>> origin/kevwjin/mvp

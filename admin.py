@@ -12,6 +12,7 @@ from payload_range import PayloadRange
 from publisher import Publisher
 from subscriber import Subscriber
 from uint8 import UInt8
+from log_utils import log_info, log_success, log_warning, log_separator, log_header, log_system
 
 
 @dataclass(frozen=True)
@@ -113,20 +114,27 @@ def main() -> None:
     broker, subscriber_info_list, stop_event, thread = launch_system(
         UInt8(args.subscribers), args.publish_interval
     )
-    print(f"Configured broker with {args.subscribers} subscribers")
+    log_header("PUB-SUB SYSTEM")
+    log_system("Configuration", f"{args.subscribers} subscribers configured")
+    log_system("Configuration", f"Publish interval: {args.publish_interval}s")
+    if args.duration:
+        log_system("Configuration", f"Runtime: {args.duration}s")
+    if args.seed is not None:
+        log_system("Configuration", f"Random seed: {args.seed}")
+    log_separator()
 
     def print_subscriber_stats(subscriber_info_list: List[SubscriberInfo]) -> None:
+        log_separator("SUBSCRIBER STATISTICS")
         for i, subscriber_info in enumerate(subscriber_info_list):
             pr = subscriber_info.payload_range
             sub = subscriber_info.subscriber
-            print(
-                f"Subscriber {i:3d}: "
-                f"payload [{int(pr.low)}, {int(pr.high)}] "
-                f"counts sum={sum(sub.counts)}"
+            log_info(
+                "Subscriber",
+                f"#{i:3d} │ Range [{int(pr.low):3d}-{int(pr.high):3d}] │ Count: {sum(sub.counts):4d}"
             )
-        print("---")
+        log_separator()
 
-    print("Publisher running; press Ctrl+C to stop.")
+    log_success("System", "Publisher running (press Ctrl+C to stop)")
     time.sleep(args.publish_interval / 2)
     try:
         if args.duration is None:
@@ -139,7 +147,7 @@ def main() -> None:
                 print_subscriber_stats(subscriber_info_list)
                 time.sleep(args.publish_interval)
     except KeyboardInterrupt:
-        print("\nShutting down.")
+        log_warning("System", "Interrupted by user, shutting down...")
     finally:
         stop_event.set()
         thread.join(timeout=1.0)
