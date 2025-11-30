@@ -27,6 +27,7 @@ class GossipBroker:
         self.ttl = ttl
 
         self.peer_brokers: Set[NodeAddress] = set()
+        self.last_seen: Dict[NodeAddress, float] = {}
 
         self.seen_messages: Set[str] = set()
 
@@ -34,6 +35,7 @@ class GossipBroker:
         self.running = False
         self.recv_thread: threading.Thread = None
         self.heartbeat_thread: threading.Thread = None
+        self.check_heartbeat_thread: threading.Thread = None
 
     def register(self, subscriber: Subscriber, payload_range: PayloadRange) -> None:
         self._local_broker.register(subscriber, payload_range)
@@ -43,9 +45,9 @@ class GossipBroker:
 
     def add_peer(self, peer: NodeAddress) -> None:
         if peer != self.address:
-            # print(f"PEER BEFORE ADDING TO PEER_BROKERS of {self.address} IS: {peer}")
-            # it's a set, so it handles duplicated by itself. we just don't add self.
             self.peer_brokers.add(peer)
+            if peer not in self.last_seen:
+                self.last_seen[peer] = time.time()  # initialize with current time
             log_network(f"Broker:{self.address.port}", "PEER ADDED", f"{peer}")
 
     def start(self) -> None:
@@ -66,6 +68,13 @@ class GossipBroker:
         )
         self.heartbeat_thread.start()
 
+        self.check_heartbeat_thread = threading.Thread(
+            target=self._check_heartbeat_loop,
+            name=f"broker-{self.address.port}-check-hb",
+            daemon=True,
+        )
+        self.check_heartbeat_thread.start()
+
         log_success(
             f"Broker:{self.address.port}",
             f"Started with {len(self.peer_brokers)} peer(s)",
@@ -80,6 +89,8 @@ class GossipBroker:
             self.recv_thread.join(timeout=2.0)
         if self.heartbeat_thread:
             self.heartbeat_thread.join(timeout=2.0)
+        if self.check_heartbeat_thread:
+            self.check_heartbeat_thread.join(timeout=2.0)
         self.network.close()
 
     def _handle_gossip_message(self, gossip_msg: GossipMessage) -> None:
@@ -138,6 +149,7 @@ class GossipBroker:
                     self._handle_gossip_message(msg)
                 elif isinstance(msg, Heartbeat):
                     self.add_peer(sender)
+                    self.last_seen[sender] = time.time()
                 elif isinstance(msg, MembershipUpdate):
                     for broker_addr in msg.brokers:
                         self.add_peer(broker_addr)
@@ -162,14 +174,40 @@ class GossipBroker:
     def _heartbeat_loop(self) -> None:
         sequence = 0
         while self.running:
-            time.sleep(5.0)
+            # Sleep in small increments to allow faster shutdown
+            for _ in range(50):  # 5 seconds total (50 * 0.1)
+                if not self.running:
+                    return
+                time.sleep(0.1)
             sequence += 1
             hb = Heartbeat(sender=self.address, sequence=sequence)
-            for peer in self.peer_brokers:
+            for peer in list(self.peer_brokers):  # Copy to avoid modification during iteration
+                if not self.running:
+                    return
                 try:
                     self.network.send(hb, peer)
                 except Exception as e:
                     pass
+
+    def _check_heartbeat_loop(self) -> None:
+        timeout_threshold = 15.0
+        while self.running:
+            # Sleep in small increments to allow faster shutdown
+            for _ in range(50):  # 5 seconds total (50 * 0.1)
+                if not self.running:
+                    return
+                time.sleep(0.1)
+            currrent_time = time.time()
+            dead_peers = []
+
+            for peer, last_time in self.last_seen.items():
+                if currrent_time - last_time > timeout_threshold:
+                    dead_peers.append(peer)
+
+            for peer in dead_peers:
+                self.peer_brokers.discard(peer)
+                del self.last_seen[peer]
+                log_info(f"Broker:{self.address.port}", f"Peer marked as deleted: {peer} and removed")
 
     def get_count(self, sub: Subscriber, payload) -> int:
         return self._local_broker.get_count(sub, payload)
