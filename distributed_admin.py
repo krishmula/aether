@@ -45,7 +45,6 @@ def main() -> None:
     total_subscribers = args.brokers * args.subscribers_per_broker
     payload_ranges = partition_payload_space(UInt8(total_subscribers))
 
-    range_idx = 0
     for broker_id in range(args.brokers):
         broker_port = args.base_port + broker_id
         broker_addr = NodeAddress("localhost", broker_port)
@@ -67,23 +66,17 @@ def main() -> None:
     # Give brokers time to start their receive loops
     time.sleep(0.5)
 
-    # Now create and connect subscribers
     for broker_id in range(args.brokers):
         broker_addr = brokers[broker_id].address
 
         for _ in range(args.subscribers_per_broker):
-            if range_idx >= len(payload_ranges):
-                break
-
-            pr = payload_ranges[range_idx]
+            pr = random.choice(payload_ranges)
             subscriber_port = 10000 + len(all_subscribers)
 
-            # Create network subscriber
             sub = NetworkSubscriber(
                 address=NodeAddress("localhost", subscriber_port)
             )
 
-            # Connect to broker
             sub.connect_to_broker(broker_addr)
 
             # Subscribe to payload range (BLOCKING - waits for ack)
@@ -93,11 +86,9 @@ def main() -> None:
             else:
                 log_warning(f"Subscriber:{subscriber_port}", f"Failed to subscribe to range [{pr.low}-{pr.high}]")
 
-            # Start receive loop
             sub.start()
 
             all_subscribers.append(sub)
-            range_idx += 1
 
     time.sleep(1.0)
 
