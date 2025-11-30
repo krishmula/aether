@@ -1,6 +1,5 @@
 import argparse
 import random
-import threading
 import time
 from typing import List
 
@@ -9,10 +8,10 @@ from gossip_broker import GossipBroker
 from message import Message
 from network import NodeAddress
 from network_publisher import NetworkPublisher
-from payload_range import PayloadRange, partition_payload_space
-from subscriber import Subscriber
+from network_subscriber import NetworkSubscriber
+from payload_range import partition_payload_space
 from uint8 import UInt8
-from log_utils import log_info, log_success, log_warning, log_separator, log_header, log_system, log_debug
+from log_utils import log_info, log_success, log_warning, log_separator, log_header, log_system
 
 
 def main() -> None:
@@ -38,11 +37,10 @@ def main() -> None:
     bootstrap = BootstrapServer(bootstrap_addr)
     bootstrap.start()
 
-
     time.sleep(0.5)
 
     brokers: List[GossipBroker] = []
-    all_subscribers: List[Subscriber] = []
+    all_subscribers: List[NetworkSubscriber] = []  # Changed type
 
     total_subscribers = args.brokers * args.subscribers_per_broker
     payload_ranges = partition_payload_space(UInt8(total_subscribers))
@@ -54,18 +52,6 @@ def main() -> None:
 
         broker = GossipBroker(broker_addr, fanout=2, ttl=5)
 
-        for _ in range(args.subscribers_per_broker):
-            if range_idx >= len(payload_ranges):
-                break
-
-            pr = payload_ranges[range_idx]
-            sub = Subscriber()
-            broker.register(sub, pr)
-            all_subscribers.append(sub)
-
-            log_info(f"Broker:{broker_port}", f"Registered subscriber for range [{pr.low}-{pr.high}]")
-            range_idx += 1
-
         # broker sends JOIN payload to the bootstrap server. receives peer list in response.
         broker.network.send("JOIN", bootstrap_addr)
 
@@ -74,8 +60,44 @@ def main() -> None:
             for peer_addr in membership.brokers:
                 broker.add_peer(peer_addr)
 
+        # Start broker BEFORE subscribers connect to it
         broker.start()
         brokers.append(broker)
+
+    # Give brokers time to start their receive loops
+    time.sleep(0.5)
+
+    # Now create and connect subscribers
+    for broker_id in range(args.brokers):
+        broker_addr = brokers[broker_id].address
+
+        for _ in range(args.subscribers_per_broker):
+            if range_idx >= len(payload_ranges):
+                break
+
+            pr = payload_ranges[range_idx]
+            subscriber_port = 10000 + len(all_subscribers)
+
+            # Create network subscriber
+            sub = NetworkSubscriber(
+                address=NodeAddress("localhost", subscriber_port)
+            )
+
+            # Connect to broker
+            sub.connect_to_broker(broker_addr)
+
+            # Subscribe to payload range (BLOCKING - waits for ack)
+            success = sub.subscribe(pr)
+            if success:
+                log_info(f"Subscriber:{subscriber_port}", f"Subscribed to range [{pr.low}-{pr.high}]")
+            else:
+                log_warning(f"Subscriber:{subscriber_port}", f"Failed to subscribe to range [{pr.low}-{pr.high}]")
+
+            # Start receive loop
+            sub.start()
+
+            all_subscribers.append(sub)
+            range_idx += 1
 
     time.sleep(1.0)
 
@@ -101,7 +123,7 @@ def main() -> None:
             if msg_count % 5 == 0:
                 log_separator(f"STATISTICS AFTER {msg_count} MESSAGES")
                 for i, sub in enumerate(all_subscribers):
-                    total = sum(sub.counts)
+                    total = sum(sub.counts)  # Works via @property
                     if total > 0:
                         log_info("Stats", f"Subscriber {i:2d}: {total:3d} messages received")
                 log_separator()
@@ -115,8 +137,15 @@ def main() -> None:
         log_warning("System", "Interrupted by user, shutting down...")
     finally:
         publisher.close()
+
+        # Stop subscribers first
+        for sub in all_subscribers:
+            sub.stop()
+
+        # Then stop brokers
         for broker in brokers:
             broker.stop()
+
         bootstrap.stop()
 
         log_separator("FINAL STATISTICS")
