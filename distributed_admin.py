@@ -8,6 +8,7 @@ from gossip_broker import GossipBroker
 from log_utils import (
     log_header,
     log_info,
+    log_network,
     log_separator,
     log_success,
     log_system,
@@ -29,6 +30,10 @@ def main() -> None:
     parser.add_argument(
         "subscribers_per_broker", type=int, help="Number of subscribers per broker"
     )
+    # NEW: Add argument for number of publishers
+    parser.add_argument(
+        "publishers", type=int, help="Number of publisher nodes to start"
+    )
     parser.add_argument("--base-port", type=int, default=8000)
     parser.add_argument("--publish-interval", type=float, default=1.0)
     parser.add_argument("--duration", type=float, default=1.0)
@@ -40,40 +45,34 @@ def main() -> None:
 
     log_header("DISTRIBUTED GOSSIP PUB-SUB SYSTEM")
 
+    # Bootstrap server setup (unchanged)
     bootstrap_addr = NodeAddress("localhost", 7000)
     bootstrap = BootstrapServer(bootstrap_addr)
     bootstrap.start()
 
-    # Give bootstrap MORE time to be fully ready
     log_info("Setup", "Waiting for bootstrap to be ready...")
-    time.sleep(2.0)  # Increased from 0.5
+    time.sleep(2.0)
 
+    # Broker setup (unchanged)
     brokers: List[GossipBroker] = []
     all_subscribers: List[NetworkSubscriber] = []
 
     total_subscribers = args.brokers * args.subscribers_per_broker
     payload_ranges = partition_payload_space(UInt8(total_subscribers))
 
-    # Create all brokers first without starting them
     log_info("Setup", f"Creating {args.brokers} brokers...")
     for broker_id in range(args.brokers):
         broker_port = args.base_port + broker_id
         broker_addr = NodeAddress("localhost", broker_port)
         broker = GossipBroker(broker_addr, fanout=2, ttl=5)
         brokers.append(broker)
-
-        # Give each broker time to start its TCP server
         time.sleep(0.5)
 
-    # Now that all broker TCP servers are listening, register them with bootstrap
     log_info("Setup", "Registering brokers with bootstrap...")
     for broker in brokers:
         try:
-            # Send JOIN to bootstrap
             broker.network.send("JOIN", bootstrap_addr)
-
-            # Wait for membership update
-            membership, _ = broker.network.receive(timeout=5.0)  # Increased timeout
+            membership, _ = broker.network.receive(timeout=5.0)
             if membership:
                 for peer_addr in membership.brokers:
                     broker.add_peer(peer_addr)
@@ -88,20 +87,17 @@ def main() -> None:
                 )
         except Exception as e:
             log_warning("Setup", f"Error registering broker {broker.address.port}: {e}")
+        time.sleep(0.5)
 
-        time.sleep(0.5)  # Space out registrations
-
-    # Start all brokers
     log_info("Setup", "Starting all brokers...")
     for broker in brokers:
         broker.start()
-        time.sleep(0.3)  # Give each broker time to fully start
+        time.sleep(0.3)
 
-    # Give brokers time to establish connections with each other
     log_info("Setup", "Waiting for broker mesh to stabilize...")
     time.sleep(2.0)
 
-    # Now create subscribers
+    # Subscriber setup (unchanged)
     log_info("Setup", f"Creating {total_subscribers} subscribers...")
     for broker_id in range(args.brokers):
         broker_addr = brokers[broker_id].address
@@ -111,13 +107,9 @@ def main() -> None:
             subscriber_port = 10000 + len(all_subscribers)
 
             sub = NetworkSubscriber(address=NodeAddress("localhost", subscriber_port))
-
-            # Give subscriber time to start its TCP server
             time.sleep(0.2)
 
             sub.connect_to_broker(broker_addr)
-
-            # Subscribe to payload range (BLOCKING - waits for ack)
             success = sub.subscribe(pr)
             if success:
                 log_info(
@@ -133,63 +125,137 @@ def main() -> None:
             sub.start()
             all_subscribers.append(sub)
 
-    # Give everything time to fully stabilize
     time.sleep(2.0)
 
+    # NEW: Publisher setup with multiple publishers
+    # Each publisher gets its own unique port starting from 9000
     broker_addresses = [b.address for b in brokers]
-    publisher_addr = NodeAddress("localhost", 9000)
-    publisher = NetworkPublisher(publisher_addr, broker_addresses)
+    publishers: List[NetworkPublisher] = []
 
-    # Give publisher time to start
-    time.sleep(0.5)
+    log_info("Setup", f"Creating {args.publishers} publishers...")
+    for pub_id in range(args.publishers):
+        # Each publisher needs a unique port for its NetworkNode
+        publisher_port = 9000 + pub_id
+        publisher_addr = NodeAddress("localhost", publisher_port)
+
+        # Each publisher gets the full list of broker addresses
+        # They will randomly select which brokers to send to
+        publisher = NetworkPublisher(publisher_addr, broker_addresses)
+        publishers.append(publisher)
+
+        log_success("Setup", f"Publisher {pub_id} created on port {publisher_port}")
+
+        # Give each publisher time to initialize its network stack
+        time.sleep(0.5)
 
     log_separator("SYSTEM STATUS")
     log_system("Configuration", f"{args.brokers} broker nodes active")
     log_system("Configuration", f"{len(all_subscribers)} subscribers registered")
-    log_system("Configuration", f"Publisher targeting {len(broker_addresses)} brokers")
+    # NEW: Log the number of active publishers
+    log_system("Configuration", f"{len(publishers)} publishers active")
+    log_system("Configuration", f"Each publisher targeting up to 2 random brokers")
     log_separator()
 
     try:
         start_time = time.time()
         msg_count = 0
 
+        # NEW: Modified publishing loop to handle multiple publishers
         while True:
-            payload = UInt8(random.randint(0, 255))
-            publisher.publish(Message(payload))
-            msg_count += 1
+            # Each publisher publishes one message per iteration
+            # This simulates a distributed system where multiple
+            # independent sources are publishing simultaneously
+            for pub_id, publisher in enumerate(publishers):
+                # Each publisher independently chooses a random payload
+                payload = UInt8(random.randint(0, 255))
 
+                # The publish method will randomly select 2 brokers
+                # from the broker_addresses list (the redundancy parameter)
+                publisher.publish(Message(payload))
+
+                # Log which publisher sent which payload
+                log_network(
+                    f"Publisher-{pub_id}:{publisher.address.port}",
+                    "PUBLISH",
+                    f"payload={payload}",
+                )
+
+            # Count all messages sent in this round
+            msg_count += len(publishers)
+
+            # Report statistics periodically
+            # Now we're sending multiple messages per iteration,
+            # so we check more frequently (every 5 total messages)
             if msg_count % 5 == 0:
                 log_separator(f"STATISTICS AFTER {msg_count} MESSAGES")
+
+                # Show per-subscriber statistics
                 for i, sub in enumerate(all_subscribers):
                     total = sum(sub.counts)
                     if total > 0:
                         log_info(
                             "Stats", f"Subscriber {i:2d}: {total:3d} messages received"
                         )
+
+                # NEW: Show per-publisher message counts
+                # This helps us verify all publishers are working
+                messages_per_publisher = msg_count // len(publishers)
+                log_info(
+                    "Stats",
+                    f"Each publisher has sent ~{messages_per_publisher} messages",
+                )
+
                 log_separator()
 
+            # Sleep between publishing rounds
+            # With multiple publishers, you might want to adjust this interval
+            # For example, if you want the same total message rate as before,
+            # you could divide the interval by the number of publishers
             time.sleep(args.publish_interval)
 
+            # Check if we've exceeded the duration
             if args.duration and (time.time() - start_time) > args.duration:
                 break
 
     except KeyboardInterrupt:
         log_warning("System", "Interrupted by user, shutting down...")
     finally:
-        publisher.close()
+        # PHASE 1: Stop publishers first
+        log_info("Cleanup", "Stopping all publishers...")
+        for pub_id, publisher in enumerate(publishers):
+            publisher.close()
+            log_success("Cleanup", f"Publisher {pub_id} closed")
 
+        # CRITICAL: Add grace period for connections to drain
+        log_info("Cleanup", "Waiting for connections to drain...")
+        time.sleep(2.0)  # Give brokers time to detect closed connections
+
+        # PHASE 2: Stop subscribers
+        log_info("Cleanup", "Stopping all subscribers...")
         for sub in all_subscribers:
             sub.stop()
 
+        # Another grace period
+        time.sleep(1.0)
+
+        # PHASE 3: Stop brokers
+        log_info("Cleanup", "Stopping all brokers...")
         for broker in brokers:
             broker.stop()
 
+        # PHASE 4: Stop bootstrap server
+        time.sleep(0.5)
         bootstrap.stop()
 
+        # Final statistics
         log_separator("FINAL STATISTICS")
+        log_system("Summary", f"Total messages published: {msg_count}")
+        log_system("Summary", f"Messages per publisher: {msg_count // len(publishers)}")
+
         for i, sub in enumerate(all_subscribers):
             total = sum(sub.counts)
             log_success("Final", f"Subscriber {i:2d}: {total:3d} total messages")
+
         log_separator()
 
 

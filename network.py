@@ -54,12 +54,9 @@ class NetworkNode:
     def __init__(self, address: NodeAddress):
         self.address = address
 
-        # Create the server socket
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Critical: Set socket to non-blocking mode for better control
-        # Actually, let's keep it blocking but with timeout
         self.server_socket.settimeout(1.0)
 
         try:
@@ -76,19 +73,15 @@ class NetworkNode:
             )
             raise
 
-        # Connection pool
         self._connections: Dict[NodeAddress, socket.socket] = {}
         self._connections_lock = threading.Lock()
 
-        # Message queue
         self._message_queue: list = []
         self._queue_lock = threading.Lock()
         self._queue_condition = threading.Condition(self._queue_lock)
 
-        # Control flag
         self._running = True
 
-        # Start server thread
         self._server_thread = threading.Thread(
             target=self._accept_connections,
             name=f"tcp-server-{address.port}",
@@ -96,7 +89,6 @@ class NetworkNode:
         )
         self._server_thread.start()
 
-        # Give the thread a moment to actually enter the accept loop
         time.sleep(0.1)
 
         log_info("NetworkNode", f"TCP node listening on {address.host}:{address.port}")
@@ -105,13 +97,9 @@ class NetworkNode:
         """
         Server thread that continuously accepts incoming TCP connections.
         """
-        # log_debug(f"NetworkNode:{self.address.port}", "=== Accept thread STARTED ===")
 
         while self._running:
             try:
-                # log_debug(
-                #     f"NetworkNode:{self.address.port}", "About to call accept()..."
-                # )
 
                 try:
                     client_socket, client_address = self.server_socket.accept()
@@ -120,10 +108,6 @@ class NetworkNode:
                         f"*** ACCEPTED connection from {client_address} ***",
                     )
                 except socket.timeout:
-                    # log_debug(
-                    #     f"NetworkNode:{self.address.port}",
-                    #     "Accept timed out (normal), looping...",
-                    # )
                     continue
                 except Exception as e:
                     if self._running:
@@ -132,7 +116,6 @@ class NetworkNode:
                         )
                     continue
 
-                # Spawn handler thread
                 handler = threading.Thread(
                     target=self._handle_connection,
                     args=(client_socket,),
@@ -155,10 +138,8 @@ class NetworkNode:
         peer_address: Optional[NodeAddress] = None
 
         try:
-            # Set timeout for receives
             peer_socket.settimeout(5.0)
 
-            # Receive identification
             data = self._recv_full_message(peer_socket)
             if data is None:
                 log_debug(
@@ -182,7 +163,6 @@ class NetworkNode:
                 f"NetworkNode:{self.address.port}", f"Identified peer as {peer_address}"
             )
 
-            # Store connection
             with self._connections_lock:
                 if peer_address in self._connections:
                     log_debug(
@@ -198,7 +178,6 @@ class NetworkNode:
                         f"Stored connection to {peer_address}",
                     )
 
-            # Receive loop
             while self._running:
                 data = self._recv_full_message(peer_socket)
                 if data is None:
@@ -247,14 +226,12 @@ class NetworkNode:
     def _recv_full_message(self, sock: socket.socket) -> Optional[bytes]:
         """Receive complete message with length prefix"""
         try:
-            # Read 4-byte length
             length_data = self._recv_exactly(sock, 4)
             if length_data is None:
                 return None
 
             message_length = int.from_bytes(length_data, byteorder="big")
 
-            # Read message
             message_data = self._recv_exactly(sock, message_length)
             return message_data
 
@@ -298,18 +275,15 @@ class NetworkNode:
         if dest == self.address:
             return
 
-        # Serialize
         try:
             data = pickle.dumps(msg)
         except Exception as e:
             log_error(f"NetworkNode:{self.address.port}", f"Failed to pickle: {e}")
             return
 
-        # Try up to 3 times
         for attempt in range(3):
             peer_socket = None
 
-            # Check for existing connection
             with self._connections_lock:
                 if dest in self._connections:
                     peer_socket = self._connections[dest]
@@ -318,7 +292,6 @@ class NetworkNode:
                         f"Reusing connection to {dest}",
                     )
 
-            # Create new connection if needed
             if peer_socket is None:
                 try:
                     log_debug(
@@ -329,7 +302,6 @@ class NetworkNode:
                     peer_socket.settimeout(5.0)
                     peer_socket.connect((dest.host, dest.port))
 
-                    # Send identification
                     id_msg = _IdentificationMessage(self.address)
                     id_data = pickle.dumps(id_msg)
 
@@ -341,12 +313,10 @@ class NetworkNode:
                         f"NetworkNode:{self.address.port}", f"Connected to {dest}"
                     )
 
-                    # Store connection
                     with self._connections_lock:
                         if dest not in self._connections:
                             self._connections[dest] = peer_socket
 
-                            # Start receiver thread
                             receiver = threading.Thread(
                                 target=self._handle_outbound_connection,
                                 args=(peer_socket, dest),
@@ -354,7 +324,6 @@ class NetworkNode:
                             )
                             receiver.start()
                         else:
-                            # Race condition - someone else connected
                             peer_socket.close()
                             peer_socket = self._connections[dest]
 
@@ -373,7 +342,6 @@ class NetworkNode:
                         )
                         return
 
-            # Send message
             if self._send_full_message(peer_socket, data):
                 log_debug(
                     f"NetworkNode:{self.address.port}",
@@ -381,7 +349,6 @@ class NetworkNode:
                 )
                 return
             else:
-                # Failed, remove connection and retry
                 with self._connections_lock:
                     if (
                         dest in self._connections
