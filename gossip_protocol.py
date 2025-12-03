@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Set
+from re import M
+from typing import Dict, Set
 
 from message import Message
 from network import NodeAddress
@@ -84,3 +85,34 @@ class PayloadMessageDelivery:
     """
 
     msg: Message
+
+
+@dataclass
+class BrokerSnapshot:
+    """
+    Captured state of a GossipBroker at a point in time.
+    Used for recovery after broker failure via Chandy-Lamport snapshots.
+    """
+
+    snapshot_id: str
+    broker_address: NodeAddress
+    peer_brokers: Set[NodeAddress]
+    remote_subscribers: Dict[NodeAddress, Set[PayloadRange]]
+    seen_message_ids: Set[str]
+    timestamp: float
+
+
+@dataclass
+class SnapshotMarker:
+    """
+     Chandy-Lamport marker message for distributed snapshot coordination.
+    When a broker receives this marker on a channel, it knows:
+    1. The sender has recorded its local state for this snapshot
+    2. Any future messages on this channel were sent after the snapshot
+    The marker propagates through the entire broker network, triggering
+    each broker to record its state and forward the marker to its peers.
+    """
+
+    snapshot_id: str
+    initiator_address: NodeAddress
+    timestamp: float

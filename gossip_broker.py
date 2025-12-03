@@ -6,7 +6,16 @@ from typing import Dict, List, Set
 
 from bootstrap import BootstrapServer
 from broker import Broker
-from gossip_protocol import GossipMessage, Heartbeat, MembershipUpdate, PayloadMessageDelivery, SubscribeRequest, SubscribeAck, UnsubscribeRequest, UnsubscribeAck
+from gossip_protocol import (
+    GossipMessage,
+    Heartbeat,
+    MembershipUpdate,
+    PayloadMessageDelivery,
+    SubscribeAck,
+    SubscribeRequest,
+    UnsubscribeAck,
+    UnsubscribeRequest,
+)
 from log_utils import log_debug, log_error, log_info, log_network, log_success
 from message import Message
 from network import NetworkNode, NodeAddress
@@ -19,13 +28,11 @@ class GossipBroker:
         self.address = address
         self.network = NetworkNode(address)
 
-        # re-use existing broker for local subscription management
         self._local_broker = Broker()
 
         self._remote_subscribers: Dict[NodeAddress, Set[PayloadRange]] = {}
         self._payload_to_remotes: List[Set[NodeAddress]] = [set() for _ in range(256)]
 
-        # gossip parameters
         self.fanout = fanout
         self.ttl = ttl
 
@@ -33,11 +40,9 @@ class GossipBroker:
         self.last_seen: Dict[NodeAddress, float] = {}
 
         self.seen_messages: Set[str] = set()
-        
-        # Lock for thread-safe access to shared state
+
         self._lock = threading.Lock()
 
-        # threading control
         self.running = False
         self.recv_thread: threading.Thread = None
         self.heartbeat_thread: threading.Thread = None
@@ -54,11 +59,10 @@ class GossipBroker:
             with self._lock:
                 self.peer_brokers.add(peer)
                 if peer not in self.last_seen:
-                    self.last_seen[peer] = time.time()  # initialize with current time
+                    self.last_seen[peer] = time.time()
             log_network(f"Broker:{self.address.port}", "PEER ADDED", f"{peer}")
 
     def start(self) -> None:
-        # thread 1: receive messages from network on a loop
         self.running = True
         self.recv_thread = threading.Thread(
             target=self._receive_loop,
@@ -67,7 +71,6 @@ class GossipBroker:
         )
         self.recv_thread.start()
 
-        # thread 2: send heartbeats
         self.heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"broker-{self.address.port}-hb",
@@ -107,12 +110,10 @@ class GossipBroker:
                     "GossipMessage",
                     f"Already seen this message, it's a duplicate. FROM BROKER {self.address}",
                 )
-                # we've already seen this message, it's a duplicate
                 return
 
             self.seen_messages.add(gossip_msg.msg_id)
 
-        # deliver to local subscribers
         self._local_broker.publish(gossip_msg.msg)
 
         self._deliver_to_remote_subscribers(gossip_msg.msg)
@@ -124,36 +125,30 @@ class GossipBroker:
         """
         Gossip the message payload to it's peer brokers.
         """
-        # Create a new GossipMessage with decremented TTL to avoid mutating the original
         forwarded_msg = GossipMessage(
             msg=gossip_msg.msg,
             msg_id=gossip_msg.msg_id,
             ttl=gossip_msg.ttl - 1,
-            source=gossip_msg.source
+            source=gossip_msg.source,
         )
 
-        # no peers to gossip to
         if len(self.peer_brokers) == 0:
             return
 
-        # print(f"PEER LIST OF BROKER {self.address} is: {self.peer_brokers}")
-
-        # number of peers to gossip to
         num_targets = min(self.fanout, len(self.peer_brokers))
         targets = random.sample(list(self.peer_brokers), num_targets)
 
-        # gossip to each peer in the targets array
-        # and then, we can even remove the failed peers from our peer list (laterrrr..)
         for peer in targets:
             try:
-                # log_info("PEER AND SELF", f"Peer is: {peer}, Self is: {self.address}")
                 self.network.send(forwarded_msg, peer)
             except Exception as e:
                 log_error(
                     f"Broker:{self.address.port}", f"Failed to gossip to {peer}: {e}"
                 )
 
-    def _register_remote(self, subscriber: NodeAddress, payload_range: PayloadRange) -> None:
+    def _register_remote(
+        self, subscriber: NodeAddress, payload_range: PayloadRange
+    ) -> None:
         if subscriber not in self._remote_subscribers:
             self._remote_subscribers[subscriber] = set()
         self._remote_subscribers[subscriber].add(payload_range)
@@ -161,9 +156,14 @@ class GossipBroker:
         for payload in range(payload_range.low, payload_range.high + 1):
             self._payload_to_remotes[payload].add(subscriber)
 
-        log_info(f"Broker:{self.address.port}", f"Registered remote subscriber {subscriber} for {payload_range}")
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Registered remote subscriber {subscriber} for {payload_range}",
+        )
 
-    def _unregister_remote(self, subscriber: NodeAddress, payload_range: PayloadRange) -> None:
+    def _unregister_remote(
+        self, subscriber: NodeAddress, payload_range: PayloadRange
+    ) -> None:
         if subscriber in self._remote_subscribers:
             self._remote_subscribers[subscriber].discard(payload_range)
             if not self._remote_subscribers[subscriber]:
@@ -172,7 +172,10 @@ class GossipBroker:
         for payload in range(payload_range.low, payload_range.high + 1):
             self._payload_to_remotes[payload].discard(subscriber)
 
-        log_info(f"Broker:{self.address.port}", f"Unregistered remote subscriber {subscriber} from {payload_range}")
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Unregistered remote subscriber {subscriber} from {payload_range}",
+        )
 
     def _deliver_to_remote_subscribers(self, msg: Message) -> None:
         remote_subs = self._payload_to_remotes[msg.payload]
@@ -190,9 +193,7 @@ class GossipBroker:
                     f"Failed to deliver message to remote subscriber {subscriber_addr}: {e}",
                 )
 
-    
     def _receive_loop(self) -> None:
-        # message received can either be the actual payload gossiped, or a heartbeat
         while self.running:
             msg, sender = self.network.receive(timeout=1.0)
             if msg is None:
@@ -241,8 +242,7 @@ class GossipBroker:
     def _heartbeat_loop(self) -> None:
         sequence = 0
         while self.running:
-            # Sleep in small increments to allow faster shutdown
-            for _ in range(50):  # 5 seconds total (50 * 0.1)
+            for _ in range(50):
                 if not self.running:
                     return
                 time.sleep(0.1)
@@ -261,8 +261,7 @@ class GossipBroker:
     def _check_heartbeat_loop(self) -> None:
         timeout_threshold = 15.0
         while self.running:
-            # Sleep in small increments to allow faster shutdown
-            for _ in range(50):  # 5 seconds total (50 * 0.1)
+            for _ in range(50):
                 if not self.running:
                     return
                 time.sleep(0.1)
@@ -284,4 +283,3 @@ class GossipBroker:
 
     def get_count(self, sub: Subscriber, payload) -> int:
         return self._local_broker.get_count(sub, payload)
-
