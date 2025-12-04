@@ -714,32 +714,38 @@ class GossipBroker:
     def recover_from_snapshot(self, snapshot: BrokerSnapshot) -> None:
         """
         Restore this broker's state from a snapshot.
-
-        ... (existing docstring) ...
         """
         with self._lock:
             # Restore subscriber registry
-            self.remote_subscribers = {
+            # Note: _remote_subscribers has underscore
+            self._remote_subscribers = {
                 addr: set(ranges)
                 for addr, ranges in snapshot.remote_subscribers.items()
             }
+
+            # Rebuild the payload lookup table
+            self._payload_to_remotes = [set() for _ in range(256)]
+            for sub_addr, ranges in self._remote_subscribers.items():
+                for pr in ranges:
+                    for payload in range(pr.low, pr.high + 1):
+                        self._payload_to_remotes[payload].add(sub_addr)
 
             # Restore peer list
             self.peer_brokers = set(snapshot.peer_brokers)
 
             # Restore seen messages to avoid duplicates
-            self._seen_messages = set(snapshot.seen_message_ids)
+            # Note: seen_messages has NO underscore
+            self.seen_messages = set(snapshot.seen_message_ids)
 
             log_success(
                 f"Broker:{self.address.port}",
                 f"Recovered state from snapshot {snapshot.snapshot_id[:8]}...: "
-                f"{len(self.remote_subscribers)} subscribers, "
+                f"{len(self._remote_subscribers)} subscribers, "
                 f"{len(self.peer_brokers)} peers, "
-                f"{len(self._seen_messages)} seen messages",
+                f"{len(self.seen_messages)} seen messages",
             )
 
         # Notify subscribers that we've taken over
-        # (Use the snapshot's broker_address as the "old" broker)
         self._reconnect_subscribers(snapshot.broker_address)
 
     def _register_remote(
@@ -756,39 +762,6 @@ class GossipBroker:
             f"Broker:{self.address.port}",
             f"Registered remote subscriber {subscriber} for {payload_range}",
         )
-
-    def _handle_broker_recovery(
-        self, notification: BrokerRecoveryNotification, sender: NodeAddress
-    ) -> None:
-        """
-        Handle notification that a broker has recovered and taken over
-        for a dead broker.
-
-        Updates our broker reference if we were connected to the old broker.
-
-        Args:
-            notification: Contains old_broker and new_broker addresses
-            sender: Who sent the notification (should be new_broker)
-        """
-        old_broker = notification.old_broker
-        new_broker = notification.new_broker
-
-        # Check if we were subscribed to the old broker
-        if hasattr(self, "broker_address") and self.broker_address == old_broker:
-            log_info(
-                f"Subscriber:{self.address.port}",
-                f"Broker recovery: {old_broker} -> {new_broker}",
-            )
-            self.broker_address = new_broker
-            log_success(
-                f"Subscriber:{self.address.port}",
-                f"Updated broker reference to {new_broker}",
-            )
-        else:
-            log_debug(
-                f"Subscriber:{self.address.port}",
-                f"Received recovery notification but was not connected to {old_broker}",
-            )
 
     def _unregister_remote(
         self, subscriber: NodeAddress, payload_range: PayloadRange
@@ -858,8 +831,6 @@ class GossipBroker:
                     self._handle_snapshot_request(msg, sender)
                 elif isinstance(msg, SnapshotResponse):
                     self._handle_snapshot_response(msg, sender)
-                elif isinstance(msg, BrokerRecoveryNotification):
-                    self._handle_broker_recovery(msg, sender)
                 elif isinstance(msg, Message):
                     msg_id = str(uuid.uuid4())
                     gossip_msg = GossipMessage(

@@ -1,15 +1,32 @@
 import threading
 from typing import Optional, Set
-from log_utils import log_info, log_debug
-from network import NetworkNode, NodeAddress
-from subscriber import Subscriber
+
+from gossip_protocol import (
+    PayloadMessageDelivery,
+    SubscribeAck,
+    SubscribeRequest,
+    UnsubscribeAck,
+    UnsubscribeRequest,
+)
+from log_utils import log_debug, log_info
 from message import Message
+from network import NetworkNode, NodeAddress
 from payload_range import PayloadRange
-from gossip_protocol import SubscribeRequest, SubscribeAck, UnsubscribeRequest, UnsubscribeAck, PayloadMessageDelivery
+from snapshot import BrokerRecoveryNotification
+from subscriber import Subscriber
+
 
 class NetworkSubscriber:
 
-    __slots__ = ("subscriber", "address", "node", "broker", "subscriptions", "running", "recv_thread")
+    __slots__ = (
+        "subscriber",
+        "address",
+        "node",
+        "broker",
+        "subscriptions",
+        "running",
+        "recv_thread",
+    )
 
     def __init__(self, address: NodeAddress) -> None:
         self.subscriber = Subscriber()
@@ -32,7 +49,7 @@ class NetworkSubscriber:
             raise RuntimeError("Broker not connected")
         if self.running:
             raise RuntimeError("Cannot subscribe after start()")
-        
+
         request = SubscribeRequest(subscriber=self.address, payload_range=payload_range)
         for attempt in range(retries):
             self.node.send(request, self.broker)
@@ -65,8 +82,10 @@ class NetworkSubscriber:
             raise RuntimeError("Broker not connected")
         if self.running:
             raise RuntimeError("Cannot unsubscribe after start()")
-        
-        request = UnsubscribeRequest(subscriber=self.address, payload_range=payload_range)
+
+        request = UnsubscribeRequest(
+            subscriber=self.address, payload_range=payload_range
+        )
 
         for attempt in range(retries):
             self.node.send(request, self.broker)
@@ -91,17 +110,47 @@ class NetworkSubscriber:
                     return False
         return False  # All retries exhausted
 
+    def _handle_broker_recovery(
+        self, notification: BrokerRecoveryNotification, sender: NodeAddress
+    ) -> None:
+        """
+        Handle notification that a broker has recovered and taken over
+        for a dead broker.
+
+        Updates our broker reference if we were connected to the old broker.
+        """
+        old_broker = notification.old_broker
+        new_broker = notification.new_broker
+
+        if self.broker == old_broker:
+            log_info(
+                f"Subscriber:{self.address.port}",
+                f"Broker recovery: {old_broker} -> {new_broker}",
+            )
+            self.broker = new_broker
+            log_info(
+                f"Subscriber:{self.address.port}",
+                f"Updated broker reference to {new_broker}",
+            )
+        else:
+            log_debug(
+                f"Subscriber:{self.address.port}",
+                f"Received recovery notification but was not connected to {old_broker}",
+            )
+
     def start(self) -> None:
         if self.running:
             return
-        self.running = True 
+        self.running = True
         self.recv_thread = threading.Thread(
-            target = self._receive_loop,
-            name = f"network-subscriber-{self.address.port}-recv",
-            daemon = True,
+            target=self._receive_loop,
+            name=f"network-subscriber-{self.address.port}-recv",
+            daemon=True,
         )
         self.recv_thread.start()
-        log_info("NetworkSubscriber", f"Started receiving messages loop at {self.address}")
+        log_info(
+            "NetworkSubscriber", f"Started receiving messages loop at {self.address}"
+        )
 
     def stop(self) -> None:
         self.running = False
@@ -118,10 +167,19 @@ class NetworkSubscriber:
                 continue
             if isinstance(msg, PayloadMessageDelivery):
                 self.subscriber.handle_msg(msg.msg)
-                log_debug("NetworkSubscriber", f"Received message {msg.msg} from broker {sender} with payload {msg.msg.payload}")
+                log_debug(
+                    "NetworkSubscriber",
+                    f"Received message {msg.msg} from broker {sender} with payload {msg.msg.payload}",
+                )
+            if isinstance(msg, BrokerRecoveryNotification):
+                self._handle_broker_recovery(msg, sender)
             else:
-                log_debug("NetworkSubscriber", f"Received unknown message type from {sender}: {msg} of type {type(msg)}")
+                log_debug(
+                    "NetworkSubscriber",
+                    f"Received unknown message type from {sender}: {msg} of type {type(msg)}",
+                )
 
     @property
     def counts(self):
         return self.subscriber.counts
+
