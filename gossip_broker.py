@@ -44,7 +44,7 @@ class GossipBroker:
         address: NodeAddress,
         fanout: int = 3,
         ttl: int = 5,
-        snapshot_interval: float = 45.0,
+        snapshot_interval: float = 15.0,
     ) -> None:
         self.address = address
         self.network = NetworkNode(address)
@@ -414,7 +414,7 @@ class GossipBroker:
 
             log_success(
                 f"Broker:{self.address.port}",
-                f"Snapshot {snapshot.snapshot_id[:8]}... complete! "
+                f"Snapshot {snapshot.snapshot_id}... complete! "
                 f"({len(snapshot.remote_subscribers)} subscribers, {len(snapshot.peer_brokers)} peers)",
             )
 
