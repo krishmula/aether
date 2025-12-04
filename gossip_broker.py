@@ -2,7 +2,7 @@ import random
 import threading
 import time
 import uuid
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from bootstrap import BootstrapServer
 from broker import Broker
@@ -16,10 +16,18 @@ from gossip_protocol import (
     UnsubscribeAck,
     UnsubscribeRequest,
 )
-from log_utils import log_debug, log_error, log_info, log_network, log_success
+from log_utils import (
+    log_debug,
+    log_error,
+    log_info,
+    log_network,
+    log_success,
+    log_warning,
+)
 from message import Message
 from network import NetworkNode, NodeAddress
 from payload_range import PayloadRange
+from snapshot import BrokerSnapshot, SnapshotMarker
 from subscriber import Subscriber
 
 
@@ -47,6 +55,12 @@ class GossipBroker:
         self.recv_thread: threading.Thread = None
         self.heartbeat_thread: threading.Thread = None
         self.check_heartbeat_thread: threading.Thread = None
+
+        self._snapshot_in_progress: Optional[str] = None
+        self._snapshot_recorded_state: Optional[BrokerSnapshot] = None
+        self._channels_recording: Dict[NodeAddress, List[GossipMessage]] = {}
+        self._channels_closed: Set[NodeAddress] = set()
+        self._peer_snapshots: Dict[NodeAddress, BrokerSnapshot] = {}
 
     def register(self, subscriber: Subscriber, payload_range: PayloadRange) -> None:
         self._local_broker.register(subscriber, payload_range)
@@ -146,6 +160,245 @@ class GossipBroker:
                     f"Broker:{self.address.port}", f"Failed to gossip to {peer}: {e}"
                 )
 
+    def _record_local_state(self, snapshot_id: str) -> BrokerSnapshot:
+        """
+        Capture current broker state for a Chandy-Lamport snapshot.
+        This creates an independent copy of all relevant state at this moment.
+        Must be called under self._lock to ensure consistency.
+        """
+        max_seen_messages = 10000
+        seen_subset = set(list(self.seen_messages)[:max_seen_messages])
+
+        snapshot = BrokerSnapshot(
+            snapshot_id=snapshot_id,
+            broker_address=self.address,
+            peer_brokers=set(self.peer_brokers),
+            remote_subscribers={
+                addr: set(ranges) for addr, ranges in self._remote_subscribers.items()
+            },
+            seen_message_ids=seen_subset,
+            timestamp=time.time(),
+        )
+
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Recorded local state for snapshot {snapshot_id[:8]}... "
+            f"({len(snapshot.remote_subscribers)} subscribers, {len(snapshot.peer_brokers)} peers)",
+        )
+
+        return snapshot
+
+    def take_snapshot(self, snapshot_id: str = None) -> BrokerSnapshot:
+        """
+        Take an immediate local snapshot (for testing purposes).
+        This is a simplified version that doesn't do full Chandy-Lamport
+        coordination. It just captures local state right now.
+        In the full implementation, snapshots will be coordinated via markers.
+        """
+        if snapshot_id is None:
+            snapshot_id = str(uuid.uuid4())
+
+        with self._lock:
+            snapshot = self._record_local_state(snapshot_id)
+
+        return snapshot
+
+    def initiate_snapshot(self, snapshot_id: str = None) -> Optional[str]:
+        """
+        Initiate a new distributed snapshot using the Chandy-Lamport algorithm.
+
+        This broker becomes the initiator: it records its local state immediately
+        and sends markers on all outgoing channels (to all peers).
+
+        Returns the snapshot_id if initiated, or None if a snapshot is already in progress.
+        """
+        with self._lock:
+            # Don't start a new snapshot if one is already in progress
+            if self._snapshot_in_progress is not None:
+                log_info(
+                    f"Broker:{self.address.port}",
+                    f"Snapshot already in progress ({self._snapshot_in_progress[:8]}...), skipping",
+                )
+                return None
+
+            # Generate snapshot ID if not provided
+            if snapshot_id is None:
+                snapshot_id = str(uuid.uuid4())
+
+            # Record our local state immediately
+            self._snapshot_in_progress = snapshot_id
+            self._snapshot_recorded_state = self._record_local_state(snapshot_id)
+
+            # Initialize channel recording for all current peers
+            # We'll record messages from each peer until we receive their marker
+            self._channels_recording = {peer: [] for peer in self.peer_brokers}
+            self._channels_closed = set()
+
+            # Get a copy of peers to send markers to (outside the lock for sending)
+            peers_to_notify = set(self.peer_brokers)
+
+        # Create the marker message
+        marker = SnapshotMarker(
+            snapshot_id=snapshot_id,
+            initiator_address=self.address,
+            timestamp=time.time(),
+        )
+
+        # Send marker to all peers
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Initiating snapshot {snapshot_id[:8]}..., sending markers to {len(peers_to_notify)} peers",
+        )
+
+        for peer in peers_to_notify:
+            try:
+                self.network.send(marker, peer)
+                log_debug(
+                    f"Broker:{self.address.port}", f"Sent snapshot marker to {peer}"
+                )
+            except Exception as e:
+                log_error(
+                    f"Broker:{self.address.port}",
+                    f"Failed to send marker to {peer}: {e}",
+                )
+
+        # Check if we're already done (no peers = no markers to wait for)
+        self._check_snapshot_complete()
+
+        return snapshot_id
+
+    def _handle_snapshot_marker(
+        self, marker: SnapshotMarker, sender: NodeAddress
+    ) -> None:
+        """
+        Handle receiving a Chandy-Lamport snapshot marker.
+
+        If this is the first marker we've seen for this snapshot:
+          - Record our local state
+          - Forward markers to all our peers (except sender)
+
+        Regardless, mark the sender's channel as "closed" for this snapshot.
+        When all channels are closed, the snapshot is complete for this broker.
+        """
+        with self._lock:
+            first_marker = self._snapshot_in_progress != marker.snapshot_id
+
+            if first_marker:
+                # This is the first marker we've received for this snapshot
+
+                if self._snapshot_in_progress is not None:
+                    # We were in the middle of a different snapshot - this shouldn't happen
+                    # in our single-snapshot-at-a-time design, but let's handle it gracefully
+                    log_warning(
+                        f"Broker:{self.address.port}",
+                        f"Received marker for {marker.snapshot_id[:8]}... while "
+                        f"{self._snapshot_in_progress[:8]}... in progress. Ignoring.",
+                    )
+                    return
+
+                # Start participating in this snapshot
+                self._snapshot_in_progress = marker.snapshot_id
+                self._snapshot_recorded_state = self._record_local_state(
+                    marker.snapshot_id
+                )
+
+                # Initialize channel recording for all peers
+                self._channels_recording = {peer: [] for peer in self.peer_brokers}
+                self._channels_closed = set()
+
+                # The sender's channel is already closed (they sent us the marker)
+                self._channels_closed.add(sender)
+
+                # Get peers to forward marker to
+                peers_to_notify = set(self.peer_brokers)
+            else:
+                # We've already seen a marker for this snapshot
+                # Just close this channel
+                self._channels_closed.add(sender)
+                peers_to_notify = set()
+
+            log_debug(
+                f"Broker:{self.address.port}",
+                f"Received marker from {sender} for snapshot {marker.snapshot_id[:8]}... "
+                f"(first={first_marker}, closed={len(self._channels_closed)}/{len(self.peer_brokers)})",
+            )
+
+        # Forward marker to peers (if this was our first marker)
+        if first_marker and peers_to_notify:
+            forward_marker = SnapshotMarker(
+                snapshot_id=marker.snapshot_id,
+                initiator_address=marker.initiator_address,
+                timestamp=marker.timestamp,
+            )
+
+            for peer in peers_to_notify:
+                try:
+                    self.network.send(forward_marker, peer)
+                    log_debug(
+                        f"Broker:{self.address.port}",
+                        f"Forwarded snapshot marker to {peer}",
+                    )
+                except Exception as e:
+                    log_error(
+                        f"Broker:{self.address.port}",
+                        f"Failed to forward marker to {peer}: {e}",
+                    )
+
+        # Check if snapshot is complete
+        self._check_snapshot_complete()
+
+    def _check_snapshot_complete(self) -> None:
+        """
+        Check if the current snapshot is complete (all channels closed).
+
+        If complete, finalize the snapshot and trigger replication.
+        Must be called after any channel is closed.
+        """
+        with self._lock:
+            if self._snapshot_in_progress is None:
+                return
+
+            if self._snapshot_recorded_state is None:
+                return
+
+            # Check if all peer channels have been closed
+            # A channel is closed when we receive a marker from that peer
+            all_closed = self._channels_closed >= set(self._channels_recording.keys())
+
+            if not all_closed:
+                return
+
+            # Snapshot is complete!
+            snapshot = self._snapshot_recorded_state
+            snapshot_id = self._snapshot_in_progress
+
+            log_success(
+                f"Broker:{self.address.port}",
+                f"Snapshot {snapshot_id[:8]}... complete! "
+                f"({len(snapshot.remote_subscribers)} subscribers, {len(snapshot.peer_brokers)} peers)",
+            )
+
+            # Reset snapshot state
+            self._snapshot_in_progress = None
+            self._snapshot_recorded_state = None
+            self._channels_recording.clear()
+            self._channels_closed.clear()
+
+        # Trigger replication (Phase 4 - we'll implement this later)
+        self._replicate_snapshot(snapshot)
+
+    def _replicate_snapshot(self, snapshot: BrokerSnapshot) -> None:
+        """
+        Replicate this broker's snapshot to peer brokers for redundant storage.
+        TODO: Implement in Phase 4.
+        """
+        print(f"TODO: Replicate snapshot ... to peers")
+
+        # log_info(
+        #     f"Broker:{self.address_port}",
+        #     f"TODO: Replicate snapshot {snapshot.snapshot_id[:8]}... to peers"
+        # )
+
     def _register_remote(
         self, subscriber: NodeAddress, payload_range: PayloadRange
     ) -> None:
@@ -221,6 +474,8 @@ class GossipBroker:
                     self._unregister_remote(subscriber_addr, payload_range)
                     ack = UnsubscribeAck(payload_range, success=True)
                     self.network.send(ack, subscriber_addr)
+                elif isinstance(msg, SnapshotMarker):
+                    self._handle_snapshot_marker(msg, sender)
                 elif isinstance(msg, Message):
                     msg_id = str(uuid.uuid4())
                     gossip_msg = GossipMessage(
