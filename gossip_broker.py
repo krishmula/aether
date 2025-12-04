@@ -27,12 +27,25 @@ from log_utils import (
 from message import Message
 from network import NetworkNode, NodeAddress
 from payload_range import PayloadRange
-from snapshot import BrokerSnapshot, SnapshotMarker
+from snapshot import (
+    BrokerRecoveryNotification,
+    BrokerSnapshot,
+    SnapshotMarker,
+    SnapshotReplica,
+    SnapshotRequest,
+    SnapshotResponse,
+)
 from subscriber import Subscriber
 
 
 class GossipBroker:
-    def __init__(self, address: NodeAddress, fanout: int = 3, ttl: int = 5) -> None:
+    def __init__(
+        self,
+        address: NodeAddress,
+        fanout: int = 3,
+        ttl: int = 5,
+        snapshot_interval: float = 45.0,
+    ) -> None:
         self.address = address
         self.network = NetworkNode(address)
 
@@ -56,11 +69,19 @@ class GossipBroker:
         self.heartbeat_thread: threading.Thread = None
         self.check_heartbeat_thread: threading.Thread = None
 
+        self.snapshot_interval = snapshot_interval
+        self.snapshot_thread: threading.Thread = None
+
         self._snapshot_in_progress: Optional[str] = None
         self._snapshot_recorded_state: Optional[BrokerSnapshot] = None
         self._channels_recording: Dict[NodeAddress, List[GossipMessage]] = {}
         self._channels_closed: Set[NodeAddress] = set()
         self._peer_snapshots: Dict[NodeAddress, BrokerSnapshot] = {}
+
+        self._pending_recovery_request: Optional[NodeAddress] = None
+        self._recovery_snapshot: Optional[BrokerSnapshot] = None
+        self._recovery_responses_received: int = 0
+        self._recovery_peers_asked: int = 0
 
     def register(self, subscriber: Subscriber, payload_range: PayloadRange) -> None:
         self._local_broker.register(subscriber, payload_range)
@@ -99,6 +120,13 @@ class GossipBroker:
         )
         self.check_heartbeat_thread.start()
 
+        self.snapshot_thread = threading.Thread(
+            target=self._snapshot_timer_loop,
+            name=f"broker-{self.address.port}-snapshot",
+            daemon=True,
+        )
+        self.snapshot_thread.start()
+
         log_success(
             f"Broker:{self.address.port}",
             f"Started with {len(self.peer_brokers)} peer(s)",
@@ -115,6 +143,8 @@ class GossipBroker:
             self.heartbeat_thread.join(timeout=2.0)
         if self.check_heartbeat_thread:
             self.check_heartbeat_thread.join(timeout=2.0)
+        if self.snapshot_thread:
+            self.snapshot_thread.join(timeout=2.0)
         self.network.close()
 
     def _handle_gossip_message(self, gossip_msg: GossipMessage) -> None:
@@ -159,6 +189,47 @@ class GossipBroker:
                 log_error(
                     f"Broker:{self.address.port}", f"Failed to gossip to {peer}: {e}"
                 )
+
+    def _reconnect_subscribers(self, old_broker: NodeAddress) -> None:
+        """
+        Notify all subscribers from the recovered snapshot that this broker
+        has taken over for the dead broker.
+
+        Sends BrokerRecoveryNotification to each subscriber, allowing them
+        to update their broker reference and resume normal operation.
+
+        Args:
+            old_broker: The address of the broker that died (which we're replacing)
+        """
+        with self._lock:
+            subscribers = list(self._remote_subscribers.keys())
+
+        if not subscribers:
+            log_info(f"Broker:{self.address.port}", f"No subscribers to reconnect")
+            return
+
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Sending recovery notifications to {len(subscribers)} subscriber(s)",
+        )
+
+        notification = BrokerRecoveryNotification(
+            old_broker=old_broker, new_broker=self.address
+        )
+
+        for subscriber in subscribers:
+            try:
+                self.network.send(notification, subscriber)
+                log_debug(
+                    f"Broker:{self.address.port}",
+                    f"Sent recovery notification to {subscriber}",
+                )
+            except Exception as e:
+                log_warning(
+                    f"Broker:{self.address.port}",
+                    f"Failed to notify subscriber {subscriber}: {e}",
+                )
+                # Subscriber might be offline - that's okay, they'll reconnect later
 
     def _record_local_state(self, snapshot_id: str) -> BrokerSnapshot:
         """
@@ -213,7 +284,6 @@ class GossipBroker:
         Returns the snapshot_id if initiated, or None if a snapshot is already in progress.
         """
         with self._lock:
-            # Don't start a new snapshot if one is already in progress
             if self._snapshot_in_progress is not None:
                 log_info(
                     f"Broker:{self.address.port}",
@@ -221,30 +291,23 @@ class GossipBroker:
                 )
                 return None
 
-            # Generate snapshot ID if not provided
             if snapshot_id is None:
                 snapshot_id = str(uuid.uuid4())
 
-            # Record our local state immediately
             self._snapshot_in_progress = snapshot_id
             self._snapshot_recorded_state = self._record_local_state(snapshot_id)
 
-            # Initialize channel recording for all current peers
-            # We'll record messages from each peer until we receive their marker
             self._channels_recording = {peer: [] for peer in self.peer_brokers}
             self._channels_closed = set()
 
-            # Get a copy of peers to send markers to (outside the lock for sending)
             peers_to_notify = set(self.peer_brokers)
 
-        # Create the marker message
         marker = SnapshotMarker(
             snapshot_id=snapshot_id,
             initiator_address=self.address,
             timestamp=time.time(),
         )
 
-        # Send marker to all peers
         log_info(
             f"Broker:{self.address.port}",
             f"Initiating snapshot {snapshot_id[:8]}..., sending markers to {len(peers_to_notify)} peers",
@@ -262,7 +325,6 @@ class GossipBroker:
                     f"Failed to send marker to {peer}: {e}",
                 )
 
-        # Check if we're already done (no peers = no markers to wait for)
         self._check_snapshot_complete()
 
         return snapshot_id
@@ -284,11 +346,8 @@ class GossipBroker:
             first_marker = self._snapshot_in_progress != marker.snapshot_id
 
             if first_marker:
-                # This is the first marker we've received for this snapshot
 
                 if self._snapshot_in_progress is not None:
-                    # We were in the middle of a different snapshot - this shouldn't happen
-                    # in our single-snapshot-at-a-time design, but let's handle it gracefully
                     log_warning(
                         f"Broker:{self.address.port}",
                         f"Received marker for {marker.snapshot_id[:8]}... while "
@@ -296,24 +355,18 @@ class GossipBroker:
                     )
                     return
 
-                # Start participating in this snapshot
                 self._snapshot_in_progress = marker.snapshot_id
                 self._snapshot_recorded_state = self._record_local_state(
                     marker.snapshot_id
                 )
 
-                # Initialize channel recording for all peers
                 self._channels_recording = {peer: [] for peer in self.peer_brokers}
                 self._channels_closed = set()
 
-                # The sender's channel is already closed (they sent us the marker)
                 self._channels_closed.add(sender)
 
-                # Get peers to forward marker to
                 peers_to_notify = set(self.peer_brokers)
             else:
-                # We've already seen a marker for this snapshot
-                # Just close this channel
                 self._channels_closed.add(sender)
                 peers_to_notify = set()
 
@@ -323,7 +376,6 @@ class GossipBroker:
                 f"(first={first_marker}, closed={len(self._channels_closed)}/{len(self.peer_brokers)})",
             )
 
-        # Forward marker to peers (if this was our first marker)
         if first_marker and peers_to_notify:
             forward_marker = SnapshotMarker(
                 snapshot_id=marker.snapshot_id,
@@ -344,39 +396,29 @@ class GossipBroker:
                         f"Failed to forward marker to {peer}: {e}",
                     )
 
-        # Check if snapshot is complete
         self._check_snapshot_complete()
 
     def _check_snapshot_complete(self) -> None:
         """
-        Check if the current snapshot is complete (all channels closed).
-
+        Check if all channels have been closed (markers received from all peers).
         If complete, finalize the snapshot and trigger replication.
-        Must be called after any channel is closed.
+
+        This method uses the frozen peer set from _channels_recording (established
+        at snapshot initiation) rather than the live peer_brokers set, which could
+        change during the snapshot due to heartbeat timeouts or new connections.
         """
-        with self._lock:
-            if self._snapshot_in_progress is None:
-                return
+        expected_peers = set(self._channels_recording.keys())
 
-            if self._snapshot_recorded_state is None:
-                return
-
-            # Check if all peer channels have been closed
-            # A channel is closed when we receive a marker from that peer
-            all_closed = self._channels_closed >= set(self._channels_recording.keys())
-
-            if not all_closed:
-                return
-
-            # Snapshot is complete!
+        if self._channels_closed >= expected_peers:
             snapshot = self._snapshot_recorded_state
-            snapshot_id = self._snapshot_in_progress
 
             log_success(
                 f"Broker:{self.address.port}",
-                f"Snapshot {snapshot_id[:8]}... complete! "
+                f"Snapshot {snapshot.snapshot_id[:8]}... complete! "
                 f"({len(snapshot.remote_subscribers)} subscribers, {len(snapshot.peer_brokers)} peers)",
             )
+
+            self._replicate_snapshot(snapshot)
 
             # Reset snapshot state
             self._snapshot_in_progress = None
@@ -384,20 +426,321 @@ class GossipBroker:
             self._channels_recording.clear()
             self._channels_closed.clear()
 
-        # Trigger replication (Phase 4 - we'll implement this later)
-        self._replicate_snapshot(snapshot)
-
-    def _replicate_snapshot(self, snapshot: BrokerSnapshot) -> None:
+    def _replicate_snapshot(self, snapshot: BrokerSnapshot, k: int = 2) -> None:
         """
         Replicate this broker's snapshot to peer brokers for redundant storage.
         TODO: Implement in Phase 4.
         """
-        print(f"TODO: Replicate snapshot ... to peers")
 
-        # log_info(
-        #     f"Broker:{self.address_port}",
-        #     f"TODO: Replicate snapshot {snapshot.snapshot_id[:8]}... to peers"
-        # )
+        with self._lock:
+            available_peers = list(self.peer_brokers)
+
+        if not available_peers:
+            log_warning(
+                f"Broker:{self.address.port}",
+                f"No peers available to replicate snapshot {snapshot.snapshot_id[:8]}...",
+            )
+            return
+
+        num_targets = min(k, len(available_peers))
+        targets = random.sample(available_peers, num_targets)
+
+        replica = SnapshotReplica(snapshot)
+
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Replicating snapshot {snapshot.snapshot_id[:8]}... to {num_targets} peer(s)",
+        )
+
+        for peer in targets:
+            try:
+                self.network.send(replica, peer)
+                log_debug(
+                    f"Broker:{self.address.port}", f"Sent snapshot replica to {peer}"
+                )
+            except Exception as e:
+                log_error(
+                    f"Broker:{self.address.port}",
+                    f"Failed to send snapshot replica to {peer}: {e}",
+                )
+
+    def _handle_snapshot_replica(
+        self, replica: SnapshotReplica, sender: NodeAddress
+    ) -> None:
+        """
+        Handle receiving a snapshot replica from another broker.
+
+        Store the snapshot so we can provide it during recovery if the
+        original broker fails.
+
+        Args:
+            replica: The SnapshotReplica message containing the snapshot
+            sender: The address of the broker that sent this replica
+        """
+        snapshot = replica.snapshot
+        source_broker = snapshot.broker_address
+
+        # Check if we already have a newer snapshot from this broker
+        with self._lock:
+            existing = self._peer_snapshots.get(source_broker)
+
+            if existing is not None and existing.timestamp >= snapshot.timestamp:
+                log_debug(
+                    f"Broker:{self.address.port}",
+                    f"Ignoring older snapshot from {source_broker} "
+                    f"(have: {existing.timestamp}, received: {snapshot.timestamp})",
+                )
+                return
+
+            # Store the snapshot
+            self._peer_snapshots[source_broker] = snapshot
+
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Stored snapshot replica for {source_broker} "
+            f"(snapshot {snapshot.snapshot_id[:8]}..., "
+            f"{len(snapshot.remote_subscribers)} subscribers, "
+            f"{len(snapshot.peer_brokers)} peers)",
+        )
+
+    def _snapshot_timer_loop(self) -> None:
+        """
+        Background thread that periodically initiates snapshots.
+
+        Uses a simple leader election heuristic: only the broker with the
+        lowest address (lexicographically) initiates. Others will participate
+        when they receive markers.
+        """
+        # Wait a bit before starting snapshots to let the system stabilize
+        initial_delay = 5.0
+        for _ in range(int(initial_delay * 10)):
+            if not self.running:
+                return
+            time.sleep(0.1)
+
+        while self.running:
+            # Sleep in small increments to allow faster shutdown
+            for _ in range(int(self.snapshot_interval * 10)):
+                if not self.running:
+                    return
+                time.sleep(0.1)
+
+            # Simple leader election: lowest address initiates
+            # This prevents all brokers from initiating simultaneously
+            with self._lock:
+                if not self.peer_brokers:
+                    # No peers, we're the only broker, so we initiate
+                    should_initiate = True
+                else:
+                    # Check if we have the "lowest" address
+                    all_addresses = self.peer_brokers | {self.address}
+                    sorted_addresses = sorted(
+                        all_addresses, key=lambda a: (a.host, a.port)
+                    )
+                    should_initiate = sorted_addresses[0] == self.address
+
+            if should_initiate:
+                log_info(
+                    f"Broker:{self.address.port}",
+                    f"Snapshot timer triggered, initiating periodic snapshot",
+                )
+                self.initiate_snapshot()
+            else:
+                log_debug(
+                    f"Broker:{self.address.port}",
+                    f"Snapshot timer triggered, but not leader - waiting for marker",
+                )
+
+    def _handle_snapshot_request(
+        self, request: SnapshotRequest, sender: NodeAddress
+    ) -> None:
+        """
+        Handle a request for a stored snapshot of a (presumably dead) broker.
+
+        If we have a snapshot for the requested broker address, send it back.
+        Otherwise, send a response with snapshot=None.
+
+        Args:
+            request: The snapshot request containing the dead broker's address
+            sender: The node requesting the snapshot (the replacement broker)
+        """
+        requested_broker = request.broker_address
+
+        with self._lock:
+            stored_snapshot = self._peer_snapshots.get(requested_broker)
+
+        if stored_snapshot:
+            log_info(
+                f"Broker:{self.address.port}",
+                f"Sending stored snapshot for {requested_broker} to {sender}",
+            )
+        else:
+            log_debug(
+                f"Broker:{self.address.port}",
+                f"No snapshot available for {requested_broker}",
+            )
+
+        # Send response (snapshot may be None if we don't have it)
+        response = SnapshotResponse(
+            broker_address=requested_broker, snapshot=stored_snapshot
+        )
+
+        try:
+            self.network.send(response, sender)
+        except Exception as e:
+            log_error(
+                f"Broker:{self.address.port}",
+                f"Failed to send snapshot response to {sender}: {e}",
+            )
+
+    def _handle_snapshot_response(
+        self, response: SnapshotResponse, sender: NodeAddress
+    ) -> None:
+        """
+        Handle a response to our snapshot request during recovery.
+
+        We may receive multiple responses (from different peers). We use the first
+        valid snapshot we receive and ignore subsequent ones.
+
+        Args:
+            response: The snapshot response (may contain None if peer didn't have it)
+            sender: The peer who sent the response
+        """
+        with self._lock:
+            self._recovery_responses_received += 1
+
+            # If we already have a snapshot, ignore this response
+            if self._recovery_snapshot is not None:
+                log_debug(
+                    f"Broker:{self.address.port}",
+                    f"Already have recovery snapshot, ignoring response from {sender}",
+                )
+                return
+
+            if response.snapshot is not None:
+                self._recovery_snapshot = response.snapshot
+                log_info(
+                    f"Broker:{self.address.port}",
+                    f"Received recovery snapshot from {sender} for {response.broker_address} "
+                    f"({len(response.snapshot.remote_subscribers)} subscribers, "
+                    f"{len(response.snapshot.peer_brokers)} peers)",
+                )
+            else:
+                log_debug(
+                    f"Broker:{self.address.port}",
+                    f"Peer {sender} has no snapshot for {response.broker_address}",
+                )
+
+    def request_snapshot_from_peers(
+        self, dead_broker: NodeAddress, timeout: float = 5.0
+    ) -> Optional[BrokerSnapshot]:
+        """
+        Request the snapshot of a dead broker from our peers.
+
+        Sends SnapshotRequest to all known peers and waits for responses.
+        Returns the first valid snapshot received, or None if no peer has it.
+
+        Args:
+            dead_broker: The address of the broker whose snapshot we need
+            timeout: How long to wait for responses (seconds)
+
+        Returns:
+            The recovered snapshot, or None if recovery failed
+        """
+        with self._lock:
+            peers = list(self.peer_brokers)
+            # Reset recovery state
+            self._pending_recovery_request = dead_broker
+            self._recovery_snapshot = None
+            self._recovery_responses_received = 0
+            self._recovery_peers_asked = len(peers)
+
+        if not peers:
+            log_warning(
+                f"Broker:{self.address.port}",
+                f"No peers available to request snapshot for {dead_broker}",
+            )
+            return None
+
+        log_info(
+            f"Broker:{self.address.port}",
+            f"Requesting snapshot for {dead_broker} from {len(peers)} peer(s)",
+        )
+
+        # Send request to all peers
+        request = SnapshotRequest(broker_address=dead_broker)
+        for peer in peers:
+            try:
+                self.network.send(request, peer)
+                log_debug(
+                    f"Broker:{self.address.port}", f"Sent snapshot request to {peer}"
+                )
+            except Exception as e:
+                log_error(
+                    f"Broker:{self.address.port}",
+                    f"Failed to send snapshot request to {peer}: {e}",
+                )
+
+        # Wait for responses (with timeout)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            with self._lock:
+                # Success: we got a snapshot
+                if self._recovery_snapshot is not None:
+                    snapshot = self._recovery_snapshot
+                    self._pending_recovery_request = None
+                    return snapshot
+
+                # All peers responded but none had the snapshot
+                if self._recovery_responses_received >= self._recovery_peers_asked:
+                    log_warning(
+                        f"Broker:{self.address.port}",
+                        f"All peers responded but none had snapshot for {dead_broker}",
+                    )
+                    self._pending_recovery_request = None
+                    return None
+
+            time.sleep(0.1)  # Small sleep to avoid busy-waiting
+
+        # Timeout
+        log_warning(
+            f"Broker:{self.address.port}",
+            f"Timeout waiting for snapshot responses for {dead_broker}",
+        )
+        with self._lock:
+            self._pending_recovery_request = None
+        return None
+
+    def recover_from_snapshot(self, snapshot: BrokerSnapshot) -> None:
+        """
+        Restore this broker's state from a snapshot.
+
+        ... (existing docstring) ...
+        """
+        with self._lock:
+            # Restore subscriber registry
+            self.remote_subscribers = {
+                addr: set(ranges)
+                for addr, ranges in snapshot.remote_subscribers.items()
+            }
+
+            # Restore peer list
+            self.peer_brokers = set(snapshot.peer_brokers)
+
+            # Restore seen messages to avoid duplicates
+            self._seen_messages = set(snapshot.seen_message_ids)
+
+            log_success(
+                f"Broker:{self.address.port}",
+                f"Recovered state from snapshot {snapshot.snapshot_id[:8]}...: "
+                f"{len(self.remote_subscribers)} subscribers, "
+                f"{len(self.peer_brokers)} peers, "
+                f"{len(self._seen_messages)} seen messages",
+            )
+
+        # Notify subscribers that we've taken over
+        # (Use the snapshot's broker_address as the "old" broker)
+        self._reconnect_subscribers(snapshot.broker_address)
 
     def _register_remote(
         self, subscriber: NodeAddress, payload_range: PayloadRange
@@ -413,6 +756,39 @@ class GossipBroker:
             f"Broker:{self.address.port}",
             f"Registered remote subscriber {subscriber} for {payload_range}",
         )
+
+    def _handle_broker_recovery(
+        self, notification: BrokerRecoveryNotification, sender: NodeAddress
+    ) -> None:
+        """
+        Handle notification that a broker has recovered and taken over
+        for a dead broker.
+
+        Updates our broker reference if we were connected to the old broker.
+
+        Args:
+            notification: Contains old_broker and new_broker addresses
+            sender: Who sent the notification (should be new_broker)
+        """
+        old_broker = notification.old_broker
+        new_broker = notification.new_broker
+
+        # Check if we were subscribed to the old broker
+        if hasattr(self, "broker_address") and self.broker_address == old_broker:
+            log_info(
+                f"Subscriber:{self.address.port}",
+                f"Broker recovery: {old_broker} -> {new_broker}",
+            )
+            self.broker_address = new_broker
+            log_success(
+                f"Subscriber:{self.address.port}",
+                f"Updated broker reference to {new_broker}",
+            )
+        else:
+            log_debug(
+                f"Subscriber:{self.address.port}",
+                f"Received recovery notification but was not connected to {old_broker}",
+            )
 
     def _unregister_remote(
         self, subscriber: NodeAddress, payload_range: PayloadRange
@@ -476,6 +852,14 @@ class GossipBroker:
                     self.network.send(ack, subscriber_addr)
                 elif isinstance(msg, SnapshotMarker):
                     self._handle_snapshot_marker(msg, sender)
+                elif isinstance(msg, SnapshotReplica):
+                    self._handle_snapshot_replica(msg, sender)
+                elif isinstance(msg, SnapshotRequest):
+                    self._handle_snapshot_request(msg, sender)
+                elif isinstance(msg, SnapshotResponse):
+                    self._handle_snapshot_response(msg, sender)
+                elif isinstance(msg, BrokerRecoveryNotification):
+                    self._handle_broker_recovery(msg, sender)
                 elif isinstance(msg, Message):
                     msg_id = str(uuid.uuid4())
                     gossip_msg = GossipMessage(
