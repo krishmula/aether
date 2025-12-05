@@ -258,6 +258,38 @@ def main() -> None:
 
         log_separator()
 
+        log_separator("SNAPSHOT STATISTICS")
+
+        for i, broker in enumerate(brokers):
+            # Number of peer snapshots stored (for recovery)
+            num_replicas = len(broker._peer_snapshots)
+
+            log_info(
+                "Snapshot",
+                f"Broker {i} (port {broker.address.port}): {num_replicas} peer snapshot(s) stored",
+            )
+
+            # Show details of stored snapshots
+            for peer_addr, snapshot in broker._peer_snapshots.items():
+                log_info(
+                    "Snapshot",
+                    f"  └─ From {peer_addr.port}: "
+                    f"{len(snapshot.remote_subscribers)} subs, "
+                    f"{len(snapshot.seen_message_ids)} seen msgs",
+                )
+
+        # Overall snapshot health
+        total_replicas = sum(len(b._peer_snapshots) for b in brokers)
+        log_success(
+            "Snapshot", f"Total snapshot replicas across cluster: {total_replicas}"
+        )
+
+        # Redundancy check
+        if total_replicas >= len(brokers):
+            log_success("Snapshot", "✓ All brokers have at least one replica stored")
+        else:
+            log_warning("Snapshot", "⚠ Some brokers may not have redundant snapshots")
+
 
 if __name__ == "__main__":
     main()

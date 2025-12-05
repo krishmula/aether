@@ -1,0 +1,50 @@
+# config.yaml - Distributed Pub-Sub Configuration
+
+# Network settings
+network:
+  # Use Tailscale IPs for cross-machine communication
+  use_tailscale: true
+
+# Bootstrap server configuration
+bootstrap:
+  host: "100.x.x.10" # Replace with actual Tailscale IP
+  port: 7000
+
+# Broker configurations
+brokers:
+  - id: 1
+    host: "100.66.53.34" # Replace with actual Tailscale IP
+    port: 8000
+  - id: 2
+    host: "100.66.27.2"
+    port: 8000
+  - id: 3
+    host: "100.78.71.50"
+    port: 8000
+  - id: 4
+    host: "100.67.24.118"
+    port: 8000
+
+# Subscriber configuration (for local machine)
+subscribers:
+  local_host: "100.104.217.78"
+" # Your local Tailscale IP
+  base_port: 10000
+  count_per_broker: 2
+
+# Publisher configuration (for local machine)
+publishers:
+  local_host: "100.104.217.78" # Your local Tailscale IP
+  base_port: 9000
+  count: 2
+
+# Gossip protocol settings
+gossip:
+  fanout: 2
+  ttl: 5
+  heartbeat_interval: 5.0
+  heartbeat_timeout: 15.0
+
+# Snapshot settings
+snapshot:
+  interval: 30.0

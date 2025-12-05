@@ -42,11 +42,9 @@ class BootstrapServer:
 
             response = MembershipUpdate(brokers=self.registered_brokers.copy())
 
-            # loop around the registered brokers and send each of them the updated list
             for broker in self.registered_brokers:
                 self.network.send(response, broker)
 
-            # self.network.send(response, sender)
             log_network(
                 "BootstrapServer",
                 "SENT PEERS",

@@ -72,7 +72,7 @@ class NetworkSubscriber:
                         f"Subscription to range {payload_range} rejected by broker {self.broker}",
                     )
                     return False
-        return False  # All retries exhausted
+        return False
 
     def handle_incoming_message(self, msg: Message) -> None:
         self.subscriber.handle_msg(msg)
@@ -108,7 +108,7 @@ class NetworkSubscriber:
                         f"Unsubscription from range {payload_range} rejected by broker {self.broker}",
                     )
                     return False
-        return False  # All retries exhausted
+        return False
 
     def _handle_broker_recovery(
         self, notification: BrokerRecoveryNotification, sender: NodeAddress
@@ -182,4 +182,3 @@ class NetworkSubscriber:
     @property
     def counts(self):
         return self.subscriber.counts
-

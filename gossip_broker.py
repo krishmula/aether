@@ -229,7 +229,6 @@ class GossipBroker:
                     f"Broker:{self.address.port}",
                     f"Failed to notify subscriber {subscriber}: {e}",
                 )
-                # Subscriber might be offline - that's okay, they'll reconnect later
 
     def _record_local_state(self, snapshot_id: str) -> BrokerSnapshot:
         """
@@ -420,7 +419,6 @@ class GossipBroker:
 
             self._replicate_snapshot(snapshot)
 
-            # Reset snapshot state
             self._snapshot_in_progress = None
             self._snapshot_recorded_state = None
             self._channels_recording.clear()
@@ -480,7 +478,6 @@ class GossipBroker:
         snapshot = replica.snapshot
         source_broker = snapshot.broker_address
 
-        # Check if we already have a newer snapshot from this broker
         with self._lock:
             existing = self._peer_snapshots.get(source_broker)
 
@@ -492,7 +489,6 @@ class GossipBroker:
                 )
                 return
 
-            # Store the snapshot
             self._peer_snapshots[source_broker] = snapshot
 
         log_info(
@@ -511,7 +507,6 @@ class GossipBroker:
         lowest address (lexicographically) initiates. Others will participate
         when they receive markers.
         """
-        # Wait a bit before starting snapshots to let the system stabilize
         initial_delay = 5.0
         for _ in range(int(initial_delay * 10)):
             if not self.running:
@@ -519,20 +514,15 @@ class GossipBroker:
             time.sleep(0.1)
 
         while self.running:
-            # Sleep in small increments to allow faster shutdown
             for _ in range(int(self.snapshot_interval * 10)):
                 if not self.running:
                     return
                 time.sleep(0.1)
 
-            # Simple leader election: lowest address initiates
-            # This prevents all brokers from initiating simultaneously
             with self._lock:
                 if not self.peer_brokers:
-                    # No peers, we're the only broker, so we initiate
                     should_initiate = True
                 else:
-                    # Check if we have the "lowest" address
                     all_addresses = self.peer_brokers | {self.address}
                     sorted_addresses = sorted(
                         all_addresses, key=lambda a: (a.host, a.port)
@@ -580,7 +570,6 @@ class GossipBroker:
                 f"No snapshot available for {requested_broker}",
             )
 
-        # Send response (snapshot may be None if we don't have it)
         response = SnapshotResponse(
             broker_address=requested_broker, snapshot=stored_snapshot
         )
@@ -609,7 +598,6 @@ class GossipBroker:
         with self._lock:
             self._recovery_responses_received += 1
 
-            # If we already have a snapshot, ignore this response
             if self._recovery_snapshot is not None:
                 log_debug(
                     f"Broker:{self.address.port}",
@@ -649,7 +637,6 @@ class GossipBroker:
         """
         with self._lock:
             peers = list(self.peer_brokers)
-            # Reset recovery state
             self._pending_recovery_request = dead_broker
             self._recovery_snapshot = None
             self._recovery_responses_received = 0
@@ -667,7 +654,6 @@ class GossipBroker:
             f"Requesting snapshot for {dead_broker} from {len(peers)} peer(s)",
         )
 
-        # Send request to all peers
         request = SnapshotRequest(broker_address=dead_broker)
         for peer in peers:
             try:
@@ -681,17 +667,14 @@ class GossipBroker:
                     f"Failed to send snapshot request to {peer}: {e}",
                 )
 
-        # Wait for responses (with timeout)
         start_time = time.time()
         while time.time() - start_time < timeout:
             with self._lock:
-                # Success: we got a snapshot
                 if self._recovery_snapshot is not None:
                     snapshot = self._recovery_snapshot
                     self._pending_recovery_request = None
                     return snapshot
 
-                # All peers responded but none had the snapshot
                 if self._recovery_responses_received >= self._recovery_peers_asked:
                     log_warning(
                         f"Broker:{self.address.port}",
@@ -700,9 +683,8 @@ class GossipBroker:
                     self._pending_recovery_request = None
                     return None
 
-            time.sleep(0.1)  # Small sleep to avoid busy-waiting
+            time.sleep(0.1)
 
-        # Timeout
         log_warning(
             f"Broker:{self.address.port}",
             f"Timeout waiting for snapshot responses for {dead_broker}",
@@ -716,25 +698,19 @@ class GossipBroker:
         Restore this broker's state from a snapshot.
         """
         with self._lock:
-            # Restore subscriber registry
-            # Note: _remote_subscribers has underscore
             self._remote_subscribers = {
                 addr: set(ranges)
                 for addr, ranges in snapshot.remote_subscribers.items()
             }
 
-            # Rebuild the payload lookup table
             self._payload_to_remotes = [set() for _ in range(256)]
             for sub_addr, ranges in self._remote_subscribers.items():
                 for pr in ranges:
                     for payload in range(pr.low, pr.high + 1):
                         self._payload_to_remotes[payload].add(sub_addr)
 
-            # Restore peer list
             self.peer_brokers = set(snapshot.peer_brokers)
 
-            # Restore seen messages to avoid duplicates
-            # Note: seen_messages has NO underscore
             self.seen_messages = set(snapshot.seen_message_ids)
 
             log_success(
@@ -745,7 +721,6 @@ class GossipBroker:
                 f"{len(self.seen_messages)} seen messages",
             )
 
-        # Notify subscribers that we've taken over
         self._reconnect_subscribers(snapshot.broker_address)
 
     def _register_remote(
