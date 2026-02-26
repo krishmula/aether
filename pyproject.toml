@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "pubsub"
+version = "0.1.0"
+description = "Distributed publish-subscribe system with gossip protocol and Chandy-Lamport snapshots"
+requires-python = ">=3.13"
+dependencies = ["pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+pubsub-admin = "pubsub.cli.admin:main"
+pubsub-distributed = "pubsub.cli.distributed_admin:main"
+pubsub-bootstrap = "pubsub.cli.run_bootstrap:main"
+pubsub-broker = "pubsub.cli.run_broker:main"
+pubsub-publishers = "pubsub.cli.run_publishers:main"
+pubsub-subscribers = "pubsub.cli.run_subscribers:main"
+
+[tool.setuptools.packages.find]
+include = ["pubsub*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
