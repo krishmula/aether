@@ -17,7 +17,7 @@ class PayloadRange:
         return self.low <= value <= self.high
 
 
-def partition_payload_space(num_partitions: UInt8) -> List['PayloadRange']:
+def partition_payload_space(num_partitions: UInt8) -> List["PayloadRange"]:
     """
     Partition 0..255 inclusive into `num_partitions` ranges.
     If the range cannot be evenly divided,

@@ -6,12 +6,11 @@ Tests that a replacement broker can retrieve a dead broker's snapshot
 from surviving peers and restore its state.
 """
 
-import sys
 import time
 
+from pubsub.core.payload_range import PayloadRange
 from pubsub.gossip.broker import GossipBroker
 from pubsub.network.node import NodeAddress
-from pubsub.core.payload_range import PayloadRange
 
 print("=" * 60)
 print("TESTING SNAPSHOT RECOVERY (Phase 6)")
@@ -82,7 +81,7 @@ print("\n--- Requesting snapshot from peers ---")
 recovered_snapshot = broker2_new.request_snapshot_from_peers(addr2, timeout=5.0)
 
 if recovered_snapshot:
-    print(f"\n✓ Successfully retrieved snapshot!")
+    print("\n✓ Successfully retrieved snapshot!")
     print(f"  Snapshot ID: {recovered_snapshot.snapshot_id[:8]}...")
     print(f"  Subscribers: {len(recovered_snapshot.remote_subscribers)}")
     print(f"  Peers: {len(recovered_snapshot.peer_brokers)}")

@@ -1,8 +1,8 @@
 # test_tcp_basic.py
 import time
 
-from pubsub.utils.log import log_error, log_header, log_info, log_success
 from pubsub.network.node import NetworkNode, NodeAddress
+from pubsub.utils.log import log_error, log_header, log_info, log_success
 
 log_header("BASIC TCP CONNECTIVITY TEST")
 

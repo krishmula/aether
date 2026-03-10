@@ -1,4 +1,5 @@
 """Subscriber implementation."""
+
 from pubsub.core.message import Message
 
 

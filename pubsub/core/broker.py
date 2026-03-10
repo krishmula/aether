@@ -1,11 +1,12 @@
 """Broker implementation."""
-from dataclasses import dataclass
-from typing import List, Set, Dict
 
-from pubsub.core.uint8 import UInt8
+from dataclasses import dataclass
+from typing import Dict, List, Set
+
 from pubsub.core.message import Message
-from pubsub.core.subscriber import Subscriber
 from pubsub.core.payload_range import PayloadRange
+from pubsub.core.subscriber import Subscriber
+from pubsub.core.uint8 import UInt8
 
 
 @dataclass(frozen=True)
@@ -17,16 +18,17 @@ class Subscription:
 class Broker:
     """Broker that coordinates subscriptions."""
 
-    __slots__ = ("_buckets", "_subscriber_to_range",)
+    __slots__ = (
+        "_buckets",
+        "_subscriber_to_range",
+    )
 
     def __init__(self) -> None:
         self._buckets: List[Set[Subscriber]] = [set() for _ in range(256)]
         self._subscriber_to_range: Dict[Subscriber, List[PayloadRange]] = {}
 
     def register(
-        self,
-        subscriber: Subscriber,
-        payload_range: PayloadRange
+        self, subscriber: Subscriber, payload_range: PayloadRange
     ) -> Subscription:
         payload_ranges = self._subscriber_to_range.setdefault(subscriber, [])
         payload_ranges.append(payload_range)

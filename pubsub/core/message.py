@@ -1,4 +1,5 @@
 """Message implementation."""
+
 from pubsub.core.uint8 import UInt8
 
 

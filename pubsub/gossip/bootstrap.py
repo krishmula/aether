@@ -1,19 +1,22 @@
+import logging
 import threading
-from typing import Set
+from typing import Optional, Set
 
-from pubsub.gossip.protocol import GossipMessage, Heartbeat, MembershipUpdate
-from pubsub.utils.log import log_debug, log_info, log_network, log_success
+from pubsub.gossip.protocol import MembershipUpdate
 from pubsub.network.node import NetworkNode, NodeAddress
+from pubsub.utils.log import BoundLogger
+
+logger = logging.getLogger(__name__)
 
 
 class BootstrapServer:
-
     def __init__(self, address: NodeAddress) -> None:
         self.address = address
         self.network = NetworkNode(address)
         self.registered_brokers: Set[NodeAddress] = set()
         self.running = False
-        self.thread: threading.Thread = None
+        self.thread: Optional[threading.Thread] = None
+        self.log = BoundLogger(logger, {"bootstrap": str(address)})
 
     def start(self) -> None:
         self.running = True
@@ -23,13 +26,13 @@ class BootstrapServer:
             daemon=True,
         )
         self.thread.start()
-        log_success("BootstrapServer", f"Started on {self.address}")
+        self.log.info("started")
 
     def stop(self) -> None:
         self.running = False
         if self.thread:
             self.thread.join(timeout=2.0)
-        log_info("BootstrapServer", "Stopped")
+        self.log.info("stopped")
 
     def _serve_loop(self) -> None:
         while self.running:
@@ -37,18 +40,17 @@ class BootstrapServer:
             if msg is None:
                 continue
 
-            self.registered_brokers.add(sender)
-            log_network("BootstrapServer", "REGISTERED", f"broker {sender}")
+            if sender is not None:
+                self.registered_brokers.add(sender)
+                self.log.info("broker registered: %s", sender)
 
             response = MembershipUpdate(brokers=self.registered_brokers.copy())
 
             for broker in self.registered_brokers:
                 self.network.send(response, broker)
 
-            log_network(
-                "BootstrapServer",
-                "SENT PEERS",
-                f"to {sender} → {len(self.registered_brokers)} broker(s)",
+            self.log.debug(
+                "membership update sent to %d broker(s)", len(self.registered_brokers)
             )
 
     def get_peer_list(self):

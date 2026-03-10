@@ -47,6 +47,11 @@ class Config:
     # Snapshot settings
     snapshot_interval: float
 
+    # Logging settings
+    log_level: str = "INFO"
+    log_file: Optional[str] = None
+    log_json_console: bool = False
+
     @property
     def bootstrap_address(self) -> NodeAddress:
         return NodeAddress(self.bootstrap_host, self.bootstrap_port)
@@ -80,6 +85,9 @@ class Config:
             heartbeat_interval=data["gossip"]["heartbeat_interval"],
             heartbeat_timeout=data["gossip"]["heartbeat_timeout"],
             snapshot_interval=data["snapshot"]["interval"],
+            log_level=data.get("logging", {}).get("level", "INFO"),
+            log_file=data.get("logging", {}).get("log_file"),
+            log_json_console=data.get("logging", {}).get("json_console", False),
         )
 
     @classmethod

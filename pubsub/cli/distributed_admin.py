@@ -1,25 +1,20 @@
 import argparse
+import logging
 import random
 import time
 from typing import List
 
+from pubsub.core.message import Message
+from pubsub.core.payload_range import partition_payload_space
+from pubsub.core.uint8 import UInt8
 from pubsub.gossip.bootstrap import BootstrapServer
 from pubsub.gossip.broker import GossipBroker
-from pubsub.utils.log import (
-    log_header,
-    log_info,
-    log_network,
-    log_separator,
-    log_success,
-    log_system,
-    log_warning,
-)
-from pubsub.core.message import Message
 from pubsub.network.node import NodeAddress
 from pubsub.network.publisher import NetworkPublisher
 from pubsub.network.subscriber import NetworkSubscriber
-from pubsub.core.payload_range import partition_payload_space
-from pubsub.core.uint8 import UInt8
+from pubsub.utils.log import log_header, log_separator, setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -37,7 +32,18 @@ def main() -> None:
     parser.add_argument("--publish-interval", type=float, default=1.0)
     parser.add_argument("--duration", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Console log level (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-file", default=None, help="Optional path to write rotating JSON logs"
+    )
     args = parser.parse_args()
+
+    setup_logging(level=args.log_level, log_file=args.log_file)
 
     if args.seed:
         random.seed(args.seed)
@@ -49,7 +55,7 @@ def main() -> None:
     bootstrap = BootstrapServer(bootstrap_addr)
     bootstrap.start()
 
-    log_info("Setup", "Waiting for bootstrap to be ready...")
+    logger.info("waiting for bootstrap to be ready")
     time.sleep(2.0)
 
     # Broker setup
@@ -59,7 +65,7 @@ def main() -> None:
     total_subscribers = args.brokers * args.subscribers_per_broker
     payload_ranges = partition_payload_space(UInt8(total_subscribers))
 
-    log_info("Setup", f"Creating {args.brokers} brokers...")
+    logger.info("creating %d brokers", args.brokers)
     for broker_id in range(args.brokers):
         broker_port = args.base_port + broker_id
         broker_addr = NodeAddress("localhost", broker_port)
@@ -67,7 +73,7 @@ def main() -> None:
         brokers.append(broker)
         time.sleep(0.5)
 
-    log_info("Setup", "Registering brokers with bootstrap...")
+    logger.info("registering brokers with bootstrap")
     for broker in brokers:
         try:
             broker.network.send("JOIN", bootstrap_addr)
@@ -75,33 +81,35 @@ def main() -> None:
             if membership:
                 for peer_addr in membership.brokers:
                     broker.add_peer(peer_addr)
-                log_success(
-                    "Setup",
-                    f"Broker {broker.address.port} registered with {len(membership.brokers)} peers",
+                logger.info(
+                    "broker:%d registered with %d peer(s)",
+                    broker.address.port,
+                    len(membership.brokers),
                 )
             else:
-                log_warning(
-                    "Setup",
-                    f"Broker {broker.address.port} did not receive membership update",
+                logger.warning(
+                    "broker:%d did not receive membership update", broker.address.port
                 )
-        except Exception as e:
-            log_warning("Setup", f"Error registering broker {broker.address.port}: {e}")
+        except Exception:
+            logger.warning(
+                "error registering broker:%d", broker.address.port, exc_info=True
+            )
         time.sleep(0.5)
 
-    log_info("Setup", "Starting all brokers...")
+    logger.info("starting all brokers")
     for broker in brokers:
         broker.start()
         time.sleep(0.3)
 
-    log_info("Setup", "Waiting for broker mesh to stabilize...")
+    logger.info("waiting for broker mesh to stabilize")
     time.sleep(2.0)
 
     # Subscriber setup
-    log_info("Setup", f"Creating {total_subscribers} subscribers...")
+    logger.info("creating %d subscribers", total_subscribers)
     for broker_id in range(args.brokers):
         broker_addr = brokers[broker_id].address
 
-        for sub_num in range(args.subscribers_per_broker):
+        for _sub_num in range(args.subscribers_per_broker):
             pr = random.choice(payload_ranges)
             subscriber_port = 10000 + len(all_subscribers)
 
@@ -111,14 +119,18 @@ def main() -> None:
             sub.connect_to_broker(broker_addr)
             success = sub.subscribe(pr)
             if success:
-                log_info(
-                    f"Subscriber:{subscriber_port}",
-                    f"Subscribed to range [{pr.low}-{pr.high}]",
+                logger.info(
+                    "subscriber:%d subscribed range=[%s-%s]",
+                    subscriber_port,
+                    pr.low,
+                    pr.high,
                 )
             else:
-                log_warning(
-                    f"Subscriber:{subscriber_port}",
-                    f"Failed to subscribe to range [{pr.low}-{pr.high}]",
+                logger.warning(
+                    "subscriber:%d failed to subscribe range=[%s-%s]",
+                    subscriber_port,
+                    pr.low,
+                    pr.high,
                 )
 
             sub.start()
@@ -126,11 +138,11 @@ def main() -> None:
 
     time.sleep(2.0)
 
-    # Publisher setup with multiple publishers
+    # Publisher setup
     broker_addresses = [b.address for b in brokers]
     publishers: List[NetworkPublisher] = []
 
-    log_info("Setup", f"Creating {args.publishers} publishers...")
+    logger.info("creating %d publishers", args.publishers)
     for pub_id in range(args.publishers):
         publisher_port = 9000 + pub_id
         publisher_addr = NodeAddress("localhost", publisher_port)
@@ -138,15 +150,14 @@ def main() -> None:
         publisher = NetworkPublisher(publisher_addr, broker_addresses)
         publishers.append(publisher)
 
-        log_success("Setup", f"Publisher {pub_id} created on port {publisher_port}")
-
+        logger.info("publisher:%d created", publisher_port)
         time.sleep(0.5)
 
     log_separator("SYSTEM STATUS")
-    log_system("Configuration", f"{args.brokers} broker nodes active")
-    log_system("Configuration", f"{len(all_subscribers)} subscribers registered")
-    log_system("Configuration", f"{len(publishers)} publishers active")
-    log_system("Configuration", f"Each publisher targeting up to 2 random brokers")
+    logger.info("%d broker nodes active", args.brokers)
+    logger.info("%d subscribers registered", len(all_subscribers))
+    logger.info("%d publishers active", len(publishers))
+    logger.info("each publisher targeting up to 2 random brokers")
     log_separator()
 
     try:
@@ -156,13 +167,12 @@ def main() -> None:
         while True:
             for pub_id, publisher in enumerate(publishers):
                 payload = UInt8(random.randint(0, 255))
-
                 publisher.publish(Message(payload))
-
-                log_network(
-                    f"Publisher-{pub_id}:{publisher.address.port}",
-                    "PUBLISH",
-                    f"payload={payload}",
+                logger.debug(
+                    "publisher-%d:%d published payload=%d",
+                    pub_id,
+                    publisher.address.port,
+                    payload,
                 )
 
             msg_count += len(publishers)
@@ -173,16 +183,12 @@ def main() -> None:
                 for i, sub in enumerate(all_subscribers):
                     total = sum(sub.counts)
                     if total > 0:
-                        log_info(
-                            "Stats", f"Subscriber {i:2d}: {total:3d} messages received"
-                        )
+                        logger.info("subscriber %02d: %3d messages received", i, total)
 
-                messages_per_publisher = msg_count // len(publishers)
-                log_info(
-                    "Stats",
-                    f"Each publisher has sent ~{messages_per_publisher} messages",
+                logger.info(
+                    "each publisher has sent ~%d messages",
+                    msg_count // len(publishers),
                 )
-
                 log_separator()
 
             time.sleep(args.publish_interval)
@@ -191,72 +197,66 @@ def main() -> None:
                 break
 
     except KeyboardInterrupt:
-        log_warning("System", "Interrupted by user, shutting down...")
+        logger.warning("interrupted by user, shutting down")
     finally:
-        # PHASE 1: Stop publishers first
-        log_info("Cleanup", "Stopping all publishers...")
+        logger.info("stopping publishers")
         for pub_id, publisher in enumerate(publishers):
             publisher.close()
-            log_success("Cleanup", f"Publisher {pub_id} closed")
+            logger.debug("publisher %d closed", pub_id)
 
-        # CRITICAL: Add grace period for connections to drain
-        log_info("Cleanup", "Waiting for connections to drain...")
+        logger.info("waiting for connections to drain")
         time.sleep(2.0)
 
-        # PHASE 2: Stop subscribers
-        log_info("Cleanup", "Stopping all subscribers...")
+        logger.info("stopping subscribers")
         for sub in all_subscribers:
             sub.stop()
 
         time.sleep(1.0)
 
-        # PHASE 3: Stop brokers
-        log_info("Cleanup", "Stopping all brokers...")
+        logger.info("stopping brokers")
         for broker in brokers:
             broker.stop()
 
-        # PHASE 4: Stop bootstrap server
         time.sleep(0.5)
         bootstrap.stop()
 
-        # Final statistics
         log_separator("FINAL STATISTICS")
-        log_system("Summary", f"Total messages published: {msg_count}")
-        log_system("Summary", f"Messages per publisher: {msg_count // len(publishers)}")
+        logger.info("total messages published: %d", msg_count)
+        logger.info("messages per publisher: %d", msg_count // len(publishers))
 
         for i, sub in enumerate(all_subscribers):
             total = sum(sub.counts)
-            log_success("Final", f"Subscriber {i:2d}: {total:3d} total messages")
-
-        log_separator()
+            logger.info("subscriber %02d: %3d total messages", i, total)
 
         log_separator("SNAPSHOT STATISTICS")
 
         for i, broker in enumerate(brokers):
             num_replicas = len(broker._peer_snapshots)
-
-            log_info(
-                "Snapshot",
-                f"Broker {i} (port {broker.address.port}): {num_replicas} peer snapshot(s) stored",
+            logger.info(
+                "broker %d (port %d): %d peer snapshot(s) stored",
+                i,
+                broker.address.port,
+                num_replicas,
             )
 
             for peer_addr, snapshot in broker._peer_snapshots.items():
-                log_info(
-                    "Snapshot",
-                    f"  └─ From {peer_addr.port}: "
-                    f"{len(snapshot.remote_subscribers)} subs, "
-                    f"{len(snapshot.seen_message_ids)} seen msgs",
+                logger.info(
+                    "  broker %d replica from port %d: subs=%d seen_msgs=%d",
+                    i,
+                    peer_addr.port,
+                    len(snapshot.remote_subscribers),
+                    len(snapshot.seen_message_ids),
                 )
 
         total_replicas = sum(len(b._peer_snapshots) for b in brokers)
-        log_success(
-            "Snapshot", f"Total snapshot replicas across cluster: {total_replicas}"
-        )
+        logger.info("total snapshot replicas across cluster: %d", total_replicas)
 
         if total_replicas >= len(brokers):
-            log_success("Snapshot", "✓ All brokers have at least one replica stored")
+            logger.info("all brokers have at least one replica stored")
         else:
-            log_warning("Snapshot", "⚠ Some brokers may not have redundant snapshots")
+            logger.warning("some brokers may not have redundant snapshots")
+
+        log_separator()
 
 
 if __name__ == "__main__":

@@ -1,12 +1,13 @@
 """Test suite for the minimal pub-sub implementation."""
+
 import unittest
 
 from pubsub.core.broker import Broker
 from pubsub.core.message import Message
+from pubsub.core.payload_range import PayloadRange
 from pubsub.core.publisher import Publisher
 from pubsub.core.subscriber import Subscriber
 from pubsub.core.uint8 import UInt8
-from pubsub.core.payload_range import PayloadRange
 
 
 class PubSubTests(unittest.TestCase):

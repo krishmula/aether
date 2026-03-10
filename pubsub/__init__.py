@@ -1,1 +1,2 @@
-"""Distributed publish-subscribe system with gossip protocol and Chandy-Lamport snapshots."""
+"""Distributed publish-subscribe system with gossip protocol \\
+and Chandy-Lamport snapshots."""

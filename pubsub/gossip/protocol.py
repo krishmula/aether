@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from typing import Dict, Set
+from typing import Set
 
 from pubsub.core.message import Message
-from pubsub.network.node import NodeAddress
 from pubsub.core.payload_range import PayloadRange
+from pubsub.network.node import NodeAddress
 
 
 @dataclass

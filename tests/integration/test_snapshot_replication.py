@@ -1,9 +1,9 @@
 import time
 
-from pubsub.gossip.broker import GossipBroker
-from pubsub.network.node import NodeAddress
 from pubsub.core.payload_range import PayloadRange
 from pubsub.core.uint8 import UInt8
+from pubsub.gossip.broker import GossipBroker
+from pubsub.network.node import NodeAddress
 
 
 def test_snapshot_replication():
@@ -63,13 +63,16 @@ def test_snapshot_replication():
     print("--- Checking snapshot replication ---\n")
 
     print(
-        f"Broker1 (port 7001) has snapshots from: {list(broker1._peer_snapshots.keys())}"
+        f"Broker1 (port 7001) has snapshots from: "
+        f"{list(broker1._peer_snapshots.keys())}"
     )
     print(
-        f"Broker2 (port 7002) has snapshots from: {list(broker2._peer_snapshots.keys())}"
+        f"Broker2 (port 7002) has snapshots from: "
+        f"{list(broker2._peer_snapshots.keys())}"
     )
     print(
-        f"Broker3 (port 7003) has snapshots from: {list(broker3._peer_snapshots.keys())}"
+        f"Broker3 (port 7003) has snapshots from: "
+        f"{list(broker3._peer_snapshots.keys())}"
     )
 
     # Verify that at least some snapshots were replicated

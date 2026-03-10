@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Run a broker on EC2."""
+
 import argparse
+import logging
 import signal
 import sys
 import time
 
 from pubsub.config import get_config
 from pubsub.gossip.broker import GossipBroker
-from pubsub.utils.log import log_header, log_info, log_success, log_warning
 from pubsub.network.node import NodeAddress
+from pubsub.utils.log import log_header, setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -17,11 +21,24 @@ def main():
     parser.add_argument("--broker-id", type=int, required=True, help="Broker ID (1-4)")
     parser.add_argument("--host", help="Override host from config")
     parser.add_argument("--port", type=int, help="Override port from config")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Console log level (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-file", default=None, help="Optional path to write rotating JSON logs"
+    )
     args = parser.parse_args()
 
     config = get_config(args.config)
+    setup_logging(
+        level=args.log_level,
+        log_file=args.log_file or config.log_file,
+        json_console=config.log_json_console,
+    )
 
-    # Find broker config by ID
     broker_config = None
     for b in config.brokers:
         if b.id == args.broker_id:
@@ -29,14 +46,14 @@ def main():
             break
 
     if broker_config is None:
-        log_warning("Broker", f"Broker ID {args.broker_id} not found in config")
+        logger.error("broker ID %d not found in config", args.broker_id)
         sys.exit(1)
 
     host = args.host or broker_config.host
     port = args.port or broker_config.port
 
     log_header(f"BROKER {args.broker_id}")
-    log_info("Broker", f"Starting on {host}:{port}")
+    logger.info("starting on %s:%d", host, port)
 
     address = NodeAddress(host, port)
     broker = GossipBroker(
@@ -46,8 +63,7 @@ def main():
         snapshot_interval=config.snapshot_interval,
     )
 
-    # Register with bootstrap
-    log_info("Broker", f"Registering with bootstrap at {config.bootstrap_address}")
+    logger.info("registering with bootstrap at %s", config.bootstrap_address)
     try:
         broker.network.send("JOIN", config.bootstrap_address)
         membership, _ = broker.network.receive(timeout=10.0)
@@ -56,27 +72,26 @@ def main():
             for peer_addr in membership.brokers:
                 if peer_addr != address:
                     broker.add_peer(peer_addr)
-            log_success("Broker", f"Registered with {len(membership.brokers)} peer(s)")
+            logger.info("registered with %d peer(s)", len(membership.brokers))
         else:
-            log_warning("Broker", "No membership response from bootstrap")
-    except Exception as e:
-        log_warning("Broker", f"Failed to register with bootstrap: {e}")
+            logger.warning("no membership response from bootstrap")
+    except Exception:
+        logger.warning("failed to register with bootstrap", exc_info=True)
 
     broker.start()
 
-    log_success("Broker", f"Broker {args.broker_id} running on {host}:{port}")
-    log_info("Broker", "Press Ctrl+C to stop")
+    logger.info(
+        "broker %d running on %s:%d — press Ctrl+C to stop", args.broker_id, host, port
+    )
 
-    # Handle graceful shutdown
     def signal_handler(sig, frame):
-        log_info("Broker", "Shutting down...")
+        logger.info("shutting down")
         broker.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Keep running
     while True:
         time.sleep(1)
 

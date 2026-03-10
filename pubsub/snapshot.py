@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
-from pubsub.network.node import NodeAddress
 from pubsub.core.payload_range import PayloadRange
+from pubsub.network.node import NodeAddress
 
 
 @dataclass

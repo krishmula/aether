@@ -11,3 +11,36 @@ ref/
 __pycache__/
 **/__pycache__/
 *.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / build artifacts
+dist/
+build/
+*.egg-info/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Environment variables
+.env
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Claude / project-local files
+.claude/
+CLAUDE.md
+docs/roadmap.md
+config.yaml
+config-local.yaml

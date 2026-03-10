@@ -1,5 +1,5 @@
 from pubsub.network.node import NetworkNode, NodeAddress
-from pubsub.utils.log import log_success, log_header
+from pubsub.utils.log import log_header, log_success
 
 log_header("NETWORK TEST")
 

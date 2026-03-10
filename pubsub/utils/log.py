@@ -1,108 +1,286 @@
-"""Logging utilities for the pub-sub system."""
+"""Logging infrastructure for the pub-sub system.
+
+Provides:
+  - setup_logging(): Configure handlers, formatters, and async dispatch.
+    Call once at each CLI entry point before anything else.
+  - BoundLogger: LoggerAdapter subclass for binding per-component context
+    (broker address, node address, etc.) into every log record automatically.
+  - bind_msg_id() / reset_msg_id(): ContextVar helpers for propagating a
+    gossip message correlation ID through the entire call stack so every log
+    record emitted during gossip dispatch carries msg_id without being passed
+    explicitly to every function.
+  - log_header() / log_separator(): Terminal UI helpers for interactive CLIs.
+    These write directly to stdout and are NOT log records.
+"""
+
+from __future__ import annotations
+
+import atexit
+import json
+import logging
+import logging.handlers
 import sys
-from datetime import datetime
-from typing import Optional
+from contextvars import ContextVar, Token
+from datetime import datetime, timezone
+from queue import Queue
+from typing import Any, MutableMapping, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Correlation ID — propagates gossip msg_id through the call stack
+# ---------------------------------------------------------------------------
+
+_msg_id_ctx: ContextVar[Optional[str]] = ContextVar("msg_id", default=None)
 
 
-class Colors:
-    """ANSI color codes for terminal output."""
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
+def bind_msg_id(msg_id: str) -> Token:
+    """Bind a gossip message ID to the current execution context.
 
-    # Regular colors
-    BLACK = '\033[30m'
-    RED = '\033[31m'
-    GREEN = '\033[32m'
-    YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    MAGENTA = '\033[35m'
-    CYAN = '\033[36m'
-    WHITE = '\033[37m'
-
-    # Bright colors
-    BRIGHT_BLACK = '\033[90m'
-    BRIGHT_RED = '\033[91m'
-    BRIGHT_GREEN = '\033[92m'
-    BRIGHT_YELLOW = '\033[93m'
-    BRIGHT_BLUE = '\033[94m'
-    BRIGHT_MAGENTA = '\033[95m'
-    BRIGHT_CYAN = '\033[96m'
-    BRIGHT_WHITE = '\033[97m'
+    Returns a reset token that must be passed to reset_msg_id() in a
+    finally block to avoid leaking context across unrelated messages.
+    """
+    return _msg_id_ctx.set(msg_id)
 
 
-def _format_timestamp() -> str:
-    """Format current timestamp for logging."""
-    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+def reset_msg_id(token: Token) -> None:
+    """Remove the gossip message ID from the current execution context."""
+    _msg_id_ctx.reset(token)
 
 
-def log_info(component: str, message: str) -> None:
-    """Log an informational message."""
-    timestamp = _format_timestamp()
-    print(f"{Colors.BRIGHT_BLACK}[{timestamp}]{Colors.RESET} "
-          f"{Colors.CYAN}ℹ {Colors.BOLD}{component}{Colors.RESET} "
-          f"{Colors.CYAN}│{Colors.RESET} {message}")
+# ---------------------------------------------------------------------------
+# BoundLogger — LoggerAdapter with automatic context injection
+# ---------------------------------------------------------------------------
 
 
-def log_success(component: str, message: str) -> None:
-    """Log a success message."""
-    timestamp = _format_timestamp()
-    print(f"{Colors.BRIGHT_BLACK}[{timestamp}]{Colors.RESET} "
-          f"{Colors.GREEN}✓ {Colors.BOLD}{component}{Colors.RESET} "
-          f"{Colors.GREEN}│{Colors.RESET} {message}")
+class BoundLogger(logging.LoggerAdapter):
+    """LoggerAdapter that merges bound fields and the active correlation ID
+    into every log record's extra dict.
+
+    Instantiate once per component, binding its identifying fields:
+
+        logger = logging.getLogger(__name__)
+        self.log = BoundLogger(logger, {"broker": str(self.address)})
+
+    Every subsequent call (self.log.info / self.log.debug / etc.) will
+    automatically include broker=<addr> — and msg_id=<uuid> whenever
+    bind_msg_id() is active on the current thread's context.
+    """
+
+    def process(
+        self, msg: str, kwargs: MutableMapping[str, Any]
+    ) -> Tuple[str, MutableMapping[str, Any]]:
+        extra: dict[str, Any] = dict(self.extra) if self.extra else {}
+        extra.update(kwargs.get("extra") or {})
+
+        msg_id = _msg_id_ctx.get()
+        if msg_id is not None:
+            extra["msg_id"] = msg_id
+
+        kwargs["extra"] = extra
+        return msg, kwargs
 
 
-def log_warning(component: str, message: str) -> None:
-    """Log a warning message."""
-    timestamp = _format_timestamp()
-    print(f"{Colors.BRIGHT_BLACK}[{timestamp}]{Colors.RESET} "
-          f"{Colors.YELLOW}⚠ {Colors.BOLD}{component}{Colors.RESET} "
-          f"{Colors.YELLOW}│{Colors.RESET} {message}")
+# ---------------------------------------------------------------------------
+# Formatters
+# ---------------------------------------------------------------------------
+
+_LEVEL_STYLES: dict[str, tuple[str, str]] = {
+    "DEBUG": ("\033[90m", "◆"),  # dim/bright-black
+    "INFO": ("\033[36m", "ℹ"),  # cyan
+    "WARNING": ("\033[33m", "⚠"),  # yellow
+    "ERROR": ("\033[31m", "✗"),  # red
+    "CRITICAL": ("\033[91m", "✗✗"),  # bright red
+}
+
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[90m"
+_CYAN_BOLD = "\033[1m\033[96m"
+_WHITE_BOLD = "\033[1m\033[97m"
+
+# Fields that BoundLogger or bind_msg_id may attach to records.
+_CONTEXT_FIELDS = ("broker", "node", "publisher", "subscriber", "bootstrap", "msg_id")
 
 
-def log_error(component: str, message: str) -> None:
-    """Log an error message."""
-    timestamp = _format_timestamp()
-    print(f"{Colors.BRIGHT_BLACK}[{timestamp}]{Colors.RESET} "
-          f"{Colors.RED}✗ {Colors.BOLD}{component}{Colors.RESET} "
-          f"{Colors.RED}│{Colors.RESET} {message}", file=sys.stderr)
+class ColoredFormatter(logging.Formatter):
+    """Human-readable, colored formatter for interactive terminal sessions.
+
+    Output format:
+        [HH:MM:SS.mmm] ℹ gossip.broker │ message  [broker=127.0.0.1:5001, msg_id=abc123]
+
+    The logger name has the leading "pubsub." stripped for brevity.
+    Context fields are appended in dim brackets when present.
+    Exception tracebacks are appended on subsequent lines.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        color, symbol = _LEVEL_STYLES.get(record.levelname, (_RESET, "?"))
+
+        # Local time, millisecond precision — friendly for interactive use.
+        ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3]
+
+        # Strip package prefix: pubsub.gossip.broker → gossip.broker
+        name = record.name.removeprefix("pubsub.")
+
+        context_parts = [
+            f"{field}={getattr(record, field)}"
+            for field in _CONTEXT_FIELDS
+            if getattr(record, field, None) is not None
+        ]
+        context_str = (
+            f"  {_DIM}[{', '.join(context_parts)}]{_RESET}" if context_parts else ""
+        )
+
+        exc_str = (
+            "\n" + self.formatException(record.exc_info) if record.exc_info else ""
+        )
+
+        return (
+            f"{_DIM}[{ts}]{_RESET} "
+            f"{color}{symbol} {_BOLD}{name}{_RESET} "
+            f"{color}│{_RESET} "
+            f"{record.getMessage()}"
+            f"{context_str}"
+            f"{exc_str}"
+        )
 
 
-def log_debug(component: str, message: str) -> None:
-    """Log a debug message."""
-    timestamp = _format_timestamp()
-    print(f"{Colors.BRIGHT_BLACK}[{timestamp}]{Colors.RESET} "
-          f"{Colors.BRIGHT_BLACK}◆ {Colors.BOLD}{component}{Colors.RESET} "
-          f"{Colors.BRIGHT_BLACK}│{Colors.RESET} {Colors.BRIGHT_BLACK}{message}{Colors.RESET}")
+class JSONFormatter(logging.Formatter):
+    """Machine-readable JSON formatter for production deployments.
+
+    Each log line is a single JSON object suitable for ingestion by
+    Datadog, Splunk, ELK, or any structured log aggregator.
+
+    Fields always present:
+        timestamp  ISO-8601 UTC with microseconds
+        level      lowercased level name (debug / info / warning / error / critical)
+        logger     fully-qualified logger name (pubsub.gossip.broker)
+        thread     thread name (set by threading.Thread(name=...))
+        message    formatted log message
+
+    Fields present when set by BoundLogger or bind_msg_id():
+        broker / node / publisher / subscriber / bootstrap
+        msg_id
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        obj: dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(
+                record.created, tz=timezone.utc
+            ).isoformat(),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "thread": record.threadName,
+            "message": record.getMessage(),
+        }
+
+        for field in _CONTEXT_FIELDS:
+            val = getattr(record, field, None)
+            if val is not None:
+                obj[field] = val
+
+        if record.exc_info:
+            obj["exc_info"] = self.formatException(record.exc_info)
+
+        return json.dumps(obj, default=str)
 
 
-def log_network(component: str, action: str, details: str) -> None:
-    """Log a network-related message."""
-    timestamp = _format_timestamp()
-    print(f"{Colors.BRIGHT_BLACK}[{timestamp}]{Colors.RESET} "
-          f"{Colors.MAGENTA}⇄ {Colors.BOLD}{component}{Colors.RESET} "
-          f"{Colors.MAGENTA}│{Colors.RESET} {Colors.BRIGHT_MAGENTA}{action}{Colors.RESET} {details}")
+# ---------------------------------------------------------------------------
+# setup_logging
+# ---------------------------------------------------------------------------
+
+_listener: Optional[logging.handlers.QueueListener] = None
 
 
-def log_system(component: str, message: str) -> None:
-    """Log a system-level message."""
-    timestamp = _format_timestamp()
-    print(f"{Colors.BRIGHT_BLACK}[{timestamp}]{Colors.RESET} "
-          f"{Colors.BRIGHT_BLUE}⚙ {Colors.BOLD}{component}{Colors.RESET} "
-          f"{Colors.BRIGHT_BLUE}│{Colors.RESET} {message}")
+def setup_logging(
+    level: str = "INFO",
+    log_file: Optional[str] = None,
+    json_console: bool = False,
+) -> None:
+    """Configure the pubsub logger hierarchy. Call once per process.
+
+    Must be called at the top of each CLI entry point's main(), before any
+    library code runs, so that the first log records are captured correctly.
+
+    All log calls are non-blocking: a QueueHandler enqueues records
+    instantly on the calling thread; a dedicated QueueListener thread
+    drains the queue and performs actual I/O (file writes, stdout writes).
+
+    Args:
+        level:        Minimum level for the console handler.
+                      One of DEBUG / INFO / WARNING / ERROR. Default: INFO.
+        log_file:     Optional path to a rotating JSON log file.
+                      When set, all records at DEBUG+ are written as JSON,
+                      independent of the console level.
+        json_console: Emit JSON on stdout even when attached to a TTY.
+                      Set to True in containerised / systemd deployments
+                      where stdout is collected by a log aggregator.
+    """
+    global _listener
+
+    root = logging.getLogger("pubsub")
+
+    # Idempotent: if already configured, skip (handles test re-use).
+    if root.handlers:
+        return
+
+    # Root pubsub logger passes everything; handlers filter by level.
+    root.setLevel(logging.DEBUG)
+
+    log_queue: Queue = Queue(maxsize=-1)
+    handlers: list[logging.Handler] = []
+
+    # -- Console handler ---------------------------------------------------
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(getattr(logging, level.upper(), logging.INFO))
+    use_json = json_console or not sys.stdout.isatty()
+    console.setFormatter(JSONFormatter() if use_json else ColoredFormatter())
+    handlers.append(console)
+
+    # -- Rotating JSON file handler (optional) ----------------------------
+    if log_file:
+        fh = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=50 * 1024 * 1024,  # 50 MB per file
+            backupCount=5,
+            encoding="utf-8",
+        )
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(JSONFormatter())
+        handlers.append(fh)
+
+    # -- Async dispatch via QueueListener ---------------------------------
+    # Log calls on daemon threads are non-blocking: they enqueue a record
+    # and return immediately. The listener drains on its own thread.
+    _listener = logging.handlers.QueueListener(
+        log_queue, *handlers, respect_handler_level=True
+    )
+    _listener.start()
+    atexit.register(_listener.stop)
+
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+    queue_handler.setLevel(logging.DEBUG)
+    root.addHandler(queue_handler)
 
 
-def log_separator(title: Optional[str] = None) -> None:
-    """Print a visual separator."""
-    if title:
-        print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}{'─' * 20} {title} {'─' * 20}{Colors.RESET}")
-    else:
-        print(f"{Colors.BRIGHT_BLACK}{'─' * 60}{Colors.RESET}")
+# ---------------------------------------------------------------------------
+# Terminal UI helpers — direct stdout writes, not log records
+# ---------------------------------------------------------------------------
 
 
 def log_header(title: str) -> None:
-    """Print a header for major sections."""
-    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}╔{'═' * 58}╗{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}║{Colors.RESET} "
-          f"{Colors.BOLD}{Colors.BRIGHT_WHITE}{title.center(56)}{Colors.RESET} "
-          f"{Colors.BOLD}{Colors.BRIGHT_CYAN}║{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}╚{'═' * 58}╝{Colors.RESET}\n")
+    """Print a decorated header box to stdout. Interactive CLI use only."""
+    print(f"\n{_CYAN_BOLD}╔{'═' * 58}╗{_RESET}")
+    print(
+        f"{_CYAN_BOLD}║{_RESET} "
+        f"{_WHITE_BOLD}{title.center(56)}{_RESET} "
+        f"{_CYAN_BOLD}║{_RESET}"
+    )
+    print(f"{_CYAN_BOLD}╚{'═' * 58}╝{_RESET}\n")
+
+
+def log_separator(title: Optional[str] = None) -> None:
+    """Print a visual separator to stdout. Interactive CLI use only."""
+    if title:
+        print(f"\n{_CYAN_BOLD}{'─' * 20} {title} {'─' * 20}{_RESET}")
+    else:
+        print(f"{_DIM}{'─' * 60}{_RESET}")

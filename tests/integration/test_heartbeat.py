@@ -1,9 +1,11 @@
 """
 Test script to verify heartbeat-based failure detection.
 """
+
 import time
-from pubsub.network.node import NodeAddress
+
 from pubsub.gossip.broker import GossipBroker
+from pubsub.network.node import NodeAddress
 
 
 def test_failure_detection():
@@ -59,13 +61,13 @@ def test_failure_detection():
     print("  - Timeout threshold: 15 seconds")
     print("  - Check interval: 5 seconds")
     print("  - Expected detection time: ~20 seconds")
-    
+
     for i in range(22, 0, -1):
         print(f"\r  Waiting... {i}s remaining", end="", flush=True)
         time.sleep(1)
     print()
 
-    print(f"\nAfter failure detection:")
+    print("\nAfter failure detection:")
     print(f"Broker1 (port 6001) peers: {broker1.peer_brokers}")
     print(f"Broker2 (port 6002) peers: {broker2.peer_brokers}")
 
@@ -76,7 +78,7 @@ def test_failure_detection():
     print("\n" + "=" * 60)
     print("RESULTS")
     print("=" * 60)
-    
+
     if broker3_removed_from_1:
         print("✓ Broker1 detected Broker3 failure and removed it")
     else:

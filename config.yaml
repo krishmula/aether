@@ -27,8 +27,7 @@ brokers:
 
 # Subscriber configuration (for local machine)
 subscribers:
-  local_host: "100.104.217.78"
-" # Your local Tailscale IP
+  local_host: "100.104.217.78" # Your local Tailscale IP
   base_port: 10000
   count_per_broker: 2
 
@@ -48,3 +47,9 @@ gossip:
 # Snapshot settings
 snapshot:
   interval: 30.0
+
+# Logging settings
+logging:
+  level: INFO          # DEBUG | INFO | WARNING | ERROR
+  log_file: null       # Optional path, e.g. /var/log/pubsub/broker.log
+  json_console: false  # true for containerised/systemd deployments

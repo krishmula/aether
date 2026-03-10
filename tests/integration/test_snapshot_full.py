@@ -17,11 +17,10 @@ to the recovered broker.
 import sys
 import time
 
+from pubsub.core.payload_range import PayloadRange
 from pubsub.gossip.broker import GossipBroker
-from pubsub.utils.log import log_error, log_info, log_success, log_warning
 from pubsub.network.node import NodeAddress
 from pubsub.network.subscriber import NetworkSubscriber
-from pubsub.core.payload_range import PayloadRange
 
 
 def main():
@@ -90,9 +89,9 @@ def main():
 
     # Verify initial state
     assert subscriber.broker == addr2, "Subscriber should be connected to broker2"
-    assert (
-        sub_addr in broker2._remote_subscribers
-    ), "Broker2 should have the subscriber registered"
+    assert sub_addr in broker2._remote_subscribers, (
+        "Broker2 should have the subscriber registered"
+    )
 
     # =========================================================================
     # PHASE 3: Trigger snapshot on broker2
@@ -166,7 +165,7 @@ def main():
         subscriber.stop()
         return False
 
-    print(f"  ✓ Retrieved snapshot!")
+    print("  ✓ Retrieved snapshot!")
     print(f"    Snapshot ID: {snapshot.snapshot_id[:8]}...")
     print(f"    Subscribers: {len(snapshot.remote_subscribers)}")
     print(f"    Peers: {len(snapshot.peer_brokers)}")

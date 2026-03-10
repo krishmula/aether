@@ -1,9 +1,7 @@
-import time
-
-from pubsub.gossip.broker import GossipBroker
-from pubsub.network.node import NodeAddress
 from pubsub.core.payload_range import PayloadRange
 from pubsub.core.uint8 import UInt8
+from pubsub.gossip.broker import GossipBroker
+from pubsub.network.node import NodeAddress
 
 
 def test_local_snapshot():
@@ -56,9 +54,9 @@ def test_local_snapshot():
 
     # Verify it's a copy, not a reference
     broker.peer_brokers.add(NodeAddress("localhost", 8003))
-    assert (
-        NodeAddress("localhost", 8003) not in snapshot.peer_brokers
-    ), "Snapshot should be independent of live state!"
+    assert NodeAddress("localhost", 8003) not in snapshot.peer_brokers, (
+        "Snapshot should be independent of live state!"
+    )
 
     print("\n✓ Snapshot capture test passed!")
 

@@ -1,11 +1,14 @@
+import logging
 import random
 import uuid
 from typing import List
 
-from pubsub.gossip.protocol import GossipMessage
-from pubsub.utils.log import log_error, log_network
 from pubsub.core.message import Message
+from pubsub.gossip.protocol import GossipMessage
 from pubsub.network.node import NetworkNode, NodeAddress
+from pubsub.utils.log import BoundLogger
+
+logger = logging.getLogger(__name__)
 
 
 class NetworkPublisher:
@@ -19,10 +22,10 @@ class NetworkPublisher:
         self.network = NetworkNode(address)
         self.broker_addresses = broker_addresses
         self.ttl = ttl
+        self.log = BoundLogger(logger, {"publisher": str(address)})
 
     def publish(self, msg: Message, redundancy: int = 2) -> int:
-        """
-        Publish a message to multiple brokers for redundancy.
+        """Publish a message to multiple brokers for redundancy.
 
         Creates a single GossipMessage with one msg_id, ensuring that
         brokers can deduplicate the message even when received from
@@ -45,16 +48,19 @@ class NetworkPublisher:
         for broker_addr in targets:
             try:
                 self.network.send(gossip_msg, broker_addr)
-                log_network(
-                    f"Publisher:{self.address.port}",
-                    "PUBLISH",
-                    f"payload={msg.payload} (id={msg_id[:8]}...) → {broker_addr}",
+                self.log.debug(
+                    "published payload=%d msg_id=%s -> %s",
+                    msg.payload,
+                    msg_id[:8],
+                    broker_addr,
                 )
                 sent_count += 1
-            except Exception as e:
-                log_error(
-                    f"Publisher:{self.address.port}",
-                    f"Failed to send to {broker_addr}: {e}",
+            except Exception:
+                self.log.error(
+                    "failed to send msg_id=%s to %s",
+                    msg_id[:8],
+                    broker_addr,
+                    exc_info=True,
                 )
 
         return sent_count
