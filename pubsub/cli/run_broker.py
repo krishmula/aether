@@ -30,6 +30,12 @@ def main():
     parser.add_argument(
         "--log-file", default=None, help="Optional path to write rotating JSON logs"
     )
+    parser.add_argument(
+        "--status-port",
+        type=int,
+        default=None,
+        help="Port for the HTTP /status endpoint (default: broker_port + 10000)",
+    )
     args = parser.parse_args()
 
     config = get_config(args.config)
@@ -56,11 +62,13 @@ def main():
     logger.info("starting on %s:%d", host, port)
 
     address = NodeAddress(host, port)
+    status_port = args.status_port if args.status_port is not None else port + 10000
     broker = GossipBroker(
         address,
         fanout=config.fanout,
         ttl=config.ttl,
         snapshot_interval=config.snapshot_interval,
+        http_port=status_port,
     )
 
     logger.info("registering with bootstrap at %s", config.bootstrap_address)
@@ -81,7 +89,11 @@ def main():
     broker.start()
 
     logger.info(
-        "broker %d running on %s:%d — press Ctrl+C to stop", args.broker_id, host, port
+        "broker %d running on %s:%d (status http://0.0.0.0:%d/status) — Ctrl+C to stop",
+        args.broker_id,
+        host,
+        port,
+        status_port,
     )
 
     def signal_handler(sig, frame):

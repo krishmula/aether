@@ -41,6 +41,5 @@ Thumbs.db
 # Claude / project-local files
 .claude/
 CLAUDE.md
-docs/roadmap.md
 config.yaml
 config-local.yaml

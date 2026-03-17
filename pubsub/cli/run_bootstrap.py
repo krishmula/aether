@@ -28,6 +28,12 @@ def main():
     parser.add_argument(
         "--log-file", default=None, help="Optional path to write rotating JSON logs"
     )
+    parser.add_argument(
+        "--status-port",
+        type=int,
+        default=None,
+        help="Port for the HTTP /status endpoint (default: bootstrap_port + 10000)",
+    )
     args = parser.parse_args()
 
     config = get_config(args.config)
@@ -44,10 +50,16 @@ def main():
     logger.info("starting on %s:%d", host, port)
 
     address = NodeAddress(host, port)
-    bootstrap = BootstrapServer(address)
+    status_port = args.status_port if args.status_port is not None else port + 10000
+    bootstrap = BootstrapServer(address, http_port=status_port)
     bootstrap.start()
 
-    logger.info("server running on %s:%d — press Ctrl+C to stop", host, port)
+    logger.info(
+        "server running on %s:%d (status http://0.0.0.0:%d/status) — Ctrl+C to stop",
+        host,
+        port,
+        status_port,
+    )
 
     def signal_handler(sig, frame):
         logger.info("shutting down")

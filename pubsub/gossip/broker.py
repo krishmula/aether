@@ -19,6 +19,7 @@ from pubsub.gossip.protocol import (
     UnsubscribeAck,
     UnsubscribeRequest,
 )
+from pubsub.gossip.status import StatusServer
 from pubsub.network.node import NetworkNode, NodeAddress
 from pubsub.snapshot import (
     BrokerRecoveryNotification,
@@ -40,6 +41,7 @@ class GossipBroker:
         fanout: int = 3,
         ttl: int = 5,
         snapshot_interval: float = 15.0,
+        http_port: Optional[int] = None,
     ) -> None:
         self.address = address
         self.network = NetworkNode(address)
@@ -78,6 +80,14 @@ class GossipBroker:
         self._recovery_snapshot: Optional[BrokerSnapshot] = None
         self._recovery_responses_received: int = 0
         self._recovery_peers_asked: int = 0
+
+        # Status / observability
+        self._start_time: float = time.time()
+        self._messages_processed: int = 0
+        self._status_port: Optional[int] = http_port
+        self._status_server: Optional[StatusServer] = (
+            StatusServer(self, http_port) if http_port is not None else None
+        )
 
     def register(self, subscriber: Subscriber, payload_range: PayloadRange) -> None:
         self._local_broker.register(subscriber, payload_range)
@@ -123,6 +133,9 @@ class GossipBroker:
         )
         self.snapshot_thread.start()
 
+        if self._status_server is not None:
+            self._status_server.start()
+
         self.log.info("started with %d peer(s)", len(self.peer_brokers))
 
     def stop(self) -> None:
@@ -136,6 +149,8 @@ class GossipBroker:
             self.check_heartbeat_thread.join(timeout=2.0)
         if self.snapshot_thread:
             self.snapshot_thread.join(timeout=2.0)
+        if self._status_server is not None:
+            self._status_server.stop()
         self.network.close()
 
     def _handle_gossip_message(self, gossip_msg: GossipMessage) -> None:
@@ -150,6 +165,7 @@ class GossipBroker:
                     return
 
                 self.seen_messages.add(gossip_msg.msg_id)
+                self._messages_processed += 1
 
             self._local_broker.publish(gossip_msg.msg)
             self._deliver_to_remote_subscribers(gossip_msg.msg)
