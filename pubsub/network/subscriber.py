@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from typing import Optional, Set
 
 from pubsub.core.message import Message
@@ -29,6 +30,9 @@ class NetworkSubscriber:
         "running",
         "recv_thread",
         "log",
+        "total_received",
+        "_start_time",
+        "_status_port",
     )
 
     def __init__(self, address: NodeAddress) -> None:
@@ -43,6 +47,9 @@ class NetworkSubscriber:
 
         self.recv_thread: Optional[threading.Thread] = None
         self.log = BoundLogger(logger, {"subscriber": str(address)})
+        self.total_received = 0
+        self._start_time: float = time.time()
+        self._status_port: Optional[int] = None
 
     def connect_to_broker(self, broker_address: NodeAddress) -> None:
         self.broker = broker_address
@@ -170,6 +177,7 @@ class NetworkSubscriber:
             if msg is None:
                 continue
             if isinstance(msg, PayloadMessageDelivery):
+                self.total_received += 1
                 self.subscriber.handle_msg(msg.msg)
                 self.log.debug(
                     "received payload=%d from broker %s", msg.msg.payload, sender

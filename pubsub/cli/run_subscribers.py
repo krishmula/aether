@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""Run subscribers locally."""
+"""Run a single subscriber."""
 
 import argparse
 import logging
 import signal
+import sys
 import time
-from typing import List
 
 from pubsub.config import get_config
 from pubsub.core.payload_range import partition_payload_space
 from pubsub.core.uint8 import UInt8
+from pubsub.gossip.status import SubscriberStatusServer
 from pubsub.network.node import NodeAddress
 from pubsub.network.subscriber import NetworkSubscriber
-from pubsub.utils.log import log_header, log_separator, setup_logging
+from pubsub.utils.log import log_header, setup_logging
 
 logger = logging.getLogger(__name__)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Local Subscribers")
+    parser = argparse.ArgumentParser(description="Run a single Subscriber")
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
+    parser.add_argument(
+        "--subscriber-id", type=int, required=True, help="Subscriber ID (0-indexed)"
+    )
+    parser.add_argument("--host", help="Override host from config")
+    parser.add_argument("--port", type=int, help="Override port from config")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -28,6 +34,12 @@ def main():
     )
     parser.add_argument(
         "--log-file", default=None, help="Optional path to write rotating JSON logs"
+    )
+    parser.add_argument(
+        "--status-port",
+        type=int,
+        default=None,
+        help="Port for the HTTP /status endpoint (default: port + 10000)",
     )
     args = parser.parse_args()
 
@@ -38,77 +50,83 @@ def main():
         json_console=config.log_json_console,
     )
 
-    log_header("LOCAL SUBSCRIBERS")
+    num_brokers = len(config.brokers)
+    total_subscribers = num_brokers * config.subscribers_per_broker
 
-    subscribers: List[NetworkSubscriber] = []
+    if args.subscriber_id < 0 or args.subscriber_id >= total_subscribers:
+        logger.error(
+            "subscriber ID %d out of range [0, %d)",
+            args.subscriber_id,
+            total_subscribers,
+        )
+        sys.exit(1)
 
-    total_subscribers = len(config.brokers) * config.subscribers_per_broker
+    # Determine broker and payload range from subscriber ID
+    broker_idx = args.subscriber_id // config.subscribers_per_broker
+    broker_config = config.brokers[broker_idx]
+    broker_addr = broker_config.to_address()
+
     payload_ranges = partition_payload_space(UInt8(total_subscribers))
+    payload_range = payload_ranges[args.subscriber_id % len(payload_ranges)]
 
-    logger.info(
-        "creating %d subscribers on %s", total_subscribers, config.subscriber_host
+    host = args.host or config.subscriber_host
+    port = (
+        args.port
+        if args.port is not None
+        else config.subscriber_base_port + args.subscriber_id
     )
 
-    subscriber_idx = 0
-    for broker_config in config.brokers:
-        broker_addr = broker_config.to_address()
+    log_header(f"SUBSCRIBER {args.subscriber_id}")
+    logger.info("starting on %s:%d", host, port)
 
-        for _ in range(config.subscribers_per_broker):
-            port = config.subscriber_base_port + subscriber_idx
-            sub_addr = NodeAddress(config.subscriber_host, port)
+    address = NodeAddress(host, port)
+    status_port = args.status_port if args.status_port is not None else port + 10000
 
-            sub = NetworkSubscriber(sub_addr)
-            sub.connect_to_broker(broker_addr)
+    sub = NetworkSubscriber(address)
+    sub._status_port = status_port
+    sub.connect_to_broker(broker_addr)
 
-            pr = payload_ranges[subscriber_idx % len(payload_ranges)]
-            success = sub.subscribe(pr)
+    success = sub.subscribe(payload_range)
+    if success:
+        logger.info(
+            "subscribed to broker %d range=[%s-%s]",
+            broker_config.id,
+            payload_range.low,
+            payload_range.high,
+        )
+    else:
+        logger.error(
+            "failed to subscribe to broker %d range=[%s-%s]",
+            broker_config.id,
+            payload_range.low,
+            payload_range.high,
+        )
+        sys.exit(1)
 
-            if success:
-                logger.info(
-                    "subscriber:%d connected to broker %d range=[%s-%s]",
-                    port,
-                    broker_config.id,
-                    pr.low,
-                    pr.high,
-                )
+    sub.start()
 
-            sub.start()
-            subscribers.append(sub)
-            subscriber_idx += 1
+    status_server = SubscriberStatusServer(sub, status_port)
+    status_server.start()
 
-    log_separator()
-    logger.info("all %d subscribers started — press Ctrl+C to stop", len(subscribers))
-
-    running = True
+    logger.info(
+        "subscriber %d on %s:%d (status http://0.0.0.0:%d/status) — Ctrl+C to stop",
+        args.subscriber_id,
+        host,
+        port,
+        status_port,
+    )
 
     def signal_handler(sig, frame):
-        nonlocal running
-        running = False
+        logger.info("shutting down")
+        sub.stop()
+        status_server.stop()
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    try:
-        while running:
-            time.sleep(5.0)
-            if running:
-                log_separator("SUBSCRIBER STATISTICS")
-                for i, sub in enumerate(subscribers):
-                    total = sum(sub.counts)
-                    logger.info("subscriber %d: %d messages received", i, total)
-    except Exception:
-        pass
-
-    log_separator("FINAL STATISTICS")
-    for i, sub in enumerate(subscribers):
-        total = sum(sub.counts)
-        logger.info("subscriber %d: %d total messages", i, total)
-
-    logger.info("stopping subscribers")
-    for sub in subscribers:
-        sub.stop()
-
-    logger.info("all subscribers stopped")
+    while True:
+        time.sleep(1)
 
 
 if __name__ == "__main__":

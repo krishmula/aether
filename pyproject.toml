@@ -22,8 +22,8 @@ pubsub-admin = "pubsub.cli.admin:main"
 pubsub-distributed = "pubsub.cli.distributed_admin:main"
 pubsub-bootstrap = "pubsub.cli.run_bootstrap:main"
 pubsub-broker = "pubsub.cli.run_broker:main"
-pubsub-publishers = "pubsub.cli.run_publishers:main"
-pubsub-subscribers = "pubsub.cli.run_subscribers:main"
+pubsub-publisher = "pubsub.cli.run_publishers:main"
+pubsub-subscriber = "pubsub.cli.run_subscribers:main"
 
 [tool.setuptools.packages.find]
 include = ["pubsub*"]

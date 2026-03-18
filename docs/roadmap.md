@@ -8,16 +8,17 @@
 
 You have a working distributed pub-sub messaging system with:
 
-- **Publishers** that send messages to topics
-- **Brokers** (multiple instances) that route messages between publishers and subscribers
-- **Subscribers** that receive messages from topics they're subscribed to
-- **Bootstrap Server** acting as a centralized lookup/discovery service
-- **Socket-based communication** (TCP) between all components
+- **Publishers** — each runs as its own process (`pubsub-publisher --publisher-id N`), owns its own TCP socket and HTTP `/status` endpoint
+- **Brokers** (multiple instances) — each runs as its own process (`pubsub-broker --broker-id N`) with gossip protocol, heartbeats, and Chandy-Lamport snapshots
+- **Subscribers** — each runs as its own process (`pubsub-subscriber --subscriber-id N`), owns its own TCP socket and HTTP `/status` endpoint
+- **Bootstrap Server** — centralized peer discovery, its own `/status` endpoint
+- **Socket-based communication** (TCP) between all components via `NetworkNode`
 - **Chandy-Lamport snapshot algorithm** implemented across brokers for consistent global state capture
 - **Acknowledgment-based reliable delivery**
 - **Peer discovery** via the bootstrap server
+- **One-process-per-component architecture** — ready for Docker containerization
 
-Everything runs locally, likely started manually from separate terminals. No containerization, no orchestration, no visualization, no metrics.
+Every component is independently launchable, independently observable via `GET /status`, and follows the same CLI pattern: one ID, one process, one container.
 
 ---
 
@@ -41,19 +42,27 @@ A fully containerized, orchestratable distributed pub-sub system with:
 ### 0.1 — Code Audit & Refactor ✅
 
 **Status: Completed**
-All components (`pubsub-broker`, `pubsub-bootstrap`, `pubsub-publishers`, `pubsub-subscribers`, `pubsub-admin`, `pubsub-distributed`) are independently launchable via CLI entry points registered in `pyproject.toml`. Each accepts `--host`, `--port`, `--config`, `--log-level`, and `--log-file` args. This is the prerequisite for Docker containerization in Phase 1.
 
-Go through your existing code and make sure every component has a clean, well-defined interface. Each component (broker, publisher, subscriber, bootstrap server) should be runnable as a standalone script with command-line arguments.
+All components are independently launchable via CLI entry points registered in `pyproject.toml`. **Every component follows the same truly-distributed pattern** — one instance per CLI invocation, matching the Phase 1 containerization model:
+
+| Command | Instance | Key Args |
+|---|---|---|
+| `pubsub-bootstrap` | One bootstrap server | `--host`, `--port`, `--status-port` |
+| `pubsub-broker` | One broker | `--broker-id`, `--host`, `--port`, `--status-port` |
+| `pubsub-subscriber` | One subscriber | `--subscriber-id`, `--host`, `--port`, `--status-port` |
+| `pubsub-publisher` | One publisher | `--publisher-id`, `--host`, `--port`, `--status-port`, `--interval` |
+
+All accept `--config`, `--log-level`, and `--log-file` args. Subscriber/publisher IDs are 0-indexed and determine the target broker, port, and payload range automatically.
 
 ```
-# Target: each component launchable like this
-python broker.py --id broker-1 --host 0.0.0.0 --port 5001 --bootstrap localhost:4000
-python publisher.py --id pub-1 --host 0.0.0.0 --port 6001 --bootstrap localhost:4000
-python subscriber.py --id sub-1 --host 0.0.0.0 --port 7001 --bootstrap localhost:4000 --topics weather,sports
-python bootstrap_server.py --host 0.0.0.0 --port 4000
+# Each component launchable like this (one process = one container)
+pubsub-broker --broker-id 1 --host broker-1 --port 8000 --status-port 18000
+pubsub-subscriber --subscriber-id 0 --host sub-0
+pubsub-publisher --publisher-id 0 --host pub-0 --interval 1.0
+pubsub-bootstrap --host bootstrap --port 7000 --status-port 17000
 ```
 
-If your components don't already accept CLI args, add them using `argparse`. This is a prerequisite for containerization — Docker containers need to be configurable via environment variables or arguments.
+This is the prerequisite for Docker containerization in Phase 1.
 
 ### 0.2 — Add Logging ✅
 
@@ -63,31 +72,27 @@ Replaced all `print()` statements with Python's `logging` module. Uses a `QueueL
 ### 0.3 — Add a Health/Status Endpoint ✅
 
 **Status: Completed**
-`StatusServer` (stdlib `ThreadingHTTPServer`, zero new dependencies) runs as a daemon thread alongside the broker. `GET /status` returns live JSON: peers, subscriber count, messages processed, uptime, and snapshot state. Wired into `GossipBroker` via `http_port` param (default: `broker_port + 10000`) and exposed via `--status-port` CLI arg. `BootstrapStatusServer` provides the same endpoint for the bootstrap server (default: `bootstrap_port + 10000`), enabling Docker healthchecks in Phase 1. Both covered by 8 unit tests in `tests/unit/test_status.py`.
 
-Add a simple HTTP endpoint to each broker (use a lightweight thread running an HTTP server alongside the socket server). This endpoint returns the broker's current state as JSON:
+All four component types expose a `GET /status` HTTP endpoint via `ThreadingHTTPServer` (stdlib, zero new dependencies), each running as a daemon thread alongside the component's TCP socket:
 
-```python
-# GET /status on each broker returns:
-{
-    "broker_id": "broker-1",
-    "host": "0.0.0.0",
-    "port": 5001,
-    "peers": ["broker-2", "broker-3"],
-    "topics": ["weather", "sports", "finance"],
-    "subscribers": {"weather": 3, "sports": 1},
-    "messages_processed": 1847,
-    "uptime_seconds": 342,
-    "snapshot_state": "idle"  # or "recording" or "complete"
-}
-```
+| Component | Status Server Class | Default Port | Response Highlights |
+|---|---|---|---|
+| `GossipBroker` | `StatusServer` | `broker_port + 10000` | `peers`, `subscribers`, `messages_processed`, `snapshot_state`, `uptime_seconds` |
+| `BootstrapServer` | `BootstrapStatusServer` | `bootstrap_port + 10000` | `registered_brokers`, `broker_count`, `uptime_seconds` |
+| `NetworkSubscriber` | `SubscriberStatusServer` | `subscriber_port + 10000` | `broker`, `subscriptions`, `total_received`, `running`, `uptime_seconds` |
+| `NetworkPublisher` | `PublisherStatusServer` | `publisher_port + 10000` | `brokers`, `broker_count`, `total_sent`, `uptime_seconds` |
 
-This status endpoint is what the orchestration layer and dashboard will poll. Use Python's built-in `http.server` or `threading` with a simple Flask/FastAPI instance — keep it lightweight.
+All status servers share the same handler pattern: dynamic subclass with component reference injected via class attribute, `_send_json()` helper, 404 for unknown paths. The `--status-port` CLI arg allows overriding the default on all components.
+
+Uptime tracking added to `NetworkSubscriber` and `NetworkPublisher` via `_start_time` attribute (set in `__init__`).
+
+Covered by **15 unit tests** in `tests/unit/test_status.py`: 5 for broker, 3 for bootstrap, 4 for subscriber, 3 for publisher. Each test creates the component (no background threads except `NetworkNode`), starts the status server, hits `/status` via `urllib`, and asserts on the response shape and live state reflection.
 
 ### 0.4 — Write a Basic Test Script ✅
 
 **Status: Completed**
-`tests/integration/test_e2e.py` is a subprocess-based integration test that launches real OS processes via CLI entry points (`pubsub-bootstrap`, `pubsub-broker`, `pubsub-publishers`, `pubsub-subscribers`). It starts 1 bootstrap server, 3 brokers in a full mesh, 1 subscriber process, and 1 publisher process; writes a temp `config.yaml` with dynamically allocated ports; polls `/status` HTTP endpoints to verify peer discovery, mesh formation, subscriber registration, message flow, and Chandy-Lamport snapshot completion. All 8 checks pass. Run with `python tests/integration/test_e2e.py`.
+
+`tests/integration/test_e2e.py` is a subprocess-based integration test that launches real OS processes via CLI entry points (`pubsub-bootstrap`, `pubsub-broker`, `pubsub-subscriber`, `pubsub-publisher`). It starts 1 bootstrap server, 3 brokers in a full mesh, individual subscriber processes, and individual publisher processes; writes a temp `config.yaml` with dynamically allocated ports; polls `/status` HTTP endpoints to verify peer discovery, mesh formation, subscriber registration, message flow, and Chandy-Lamport snapshot completion. All checks pass. Run with `python tests/integration/test_e2e.py`.
 
 Create a script that programmatically starts the full system, publishes N messages, verifies they're received by subscribers, triggers a snapshot, and validates the snapshot output. This becomes your regression test as you add features.
 
@@ -111,135 +116,57 @@ Create a script that programmatically starts the full system, publishes N messag
 
 **Goal:** Every component runs in its own Docker container. The entire system spins up with one command.
 
-### 1.1 — Dockerfiles
+### 1.1 — Dockerfiles ✅
 
-Create a single Dockerfile that works for all components (they're all Python):
+**Status: Completed**
 
-```dockerfile
-FROM python:3.11-slim
+Single Dockerfile works for all components (they're all Python). Uses `python:3.13-slim` base image with `pyyaml` dependency. Component is determined by CMD override in `docker-compose.yml`.
 
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+### 1.2 — Docker Compose (Truly Distributed Topology) ✅
 
-COPY . .
+**Status: Completed**
 
-# Component determined by CMD override in docker-compose
-CMD ["python", "broker.py"]
-```
+The `docker-compose.yml` implements the **truly distributed model** — each component runs in its own container:
 
-### 1.2 — Docker Compose (Static Topology)
+| Service | Container Name | CLI Command |
+|---|---|---|
+| `bootstrap` | `pubsub-bootstrap` | `pubsub-bootstrap --host bootstrap --port 7000 --status-port 17000` |
+| `broker-1` | `pubsub-broker-1` | `pubsub-broker --broker-id 1 --host broker-1 --port 8000 --status-port 18000` |
+| `broker-2` | `pubsub-broker-2` | `pubsub-broker --broker-id 2 --host broker-2 --port 8000 --status-port 18000` |
+| `broker-3` | `pubsub-broker-3` | `pubsub-broker --broker-id 3 --host broker-3 --port 8000 --status-port 18000` |
+| `subscriber-0` | `pubsub-subscriber-0` | `pubsub-subscriber --subscriber-id 0 --host subscriber-0` |
+| `subscriber-1` | `pubsub-subscriber-1` | `pubsub-subscriber --subscriber-id 1 --host subscriber-1` |
+| `subscriber-2` | `pubsub-subscriber-2` | `pubsub-subscriber --subscriber-id 2 --host subscriber-2` |
+| `publisher-0` | `pubsub-publisher-0` | `pubsub-publisher --publisher-id 0 --host publisher-0 --interval 1.0` |
+| `publisher-1` | `pubsub-publisher-1` | `pubsub-publisher --publisher-id 1 --host publisher-1 --interval 1.0` |
 
-Start with a fixed topology to prove containerization works:
+Each container has:
+- Unique hostname on the Docker bridge network (`pubsub-net`)
+- Own TCP port and status port exposed to host
+- Healthcheck polling `GET /status` (brokers and bootstrap)
+- Dependencies on broker health before starting (subscribers and publishers)
 
-```yaml
-# docker-compose.yml
-version: "3.8"
-
-services:
-  bootstrap:
-    build: .
-    command: python bootstrap_server.py --host 0.0.0.0 --port 4000
-    ports:
-      - "4000:4000"
-    networks:
-      - pubsub-net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/status"]
-      interval: 5s
-      retries: 3
-
-  broker-1:
-    build: .
-    command: python broker.py --id broker-1 --host 0.0.0.0 --port 5001 --bootstrap bootstrap:4000
-    ports:
-      - "5001:5001"
-      - "8001:8001" # HTTP status endpoint
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    networks:
-      - pubsub-net
-
-  broker-2:
-    build: .
-    command: python broker.py --id broker-2 --host 0.0.0.0 --port 5002 --bootstrap bootstrap:4000
-    ports:
-      - "5002:5002"
-      - "8002:8002"
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    networks:
-      - pubsub-net
-
-  broker-3:
-    build: .
-    command: python broker.py --id broker-3 --host 0.0.0.0 --port 5003 --bootstrap bootstrap:4000
-    ports:
-      - "5003:5003"
-      - "8003:8003"
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    networks:
-      - pubsub-net
-
-  publisher-1:
-    build: .
-    command: python publisher.py --id pub-1 --bootstrap bootstrap:4000 --topics weather,sports --rate 10
-    depends_on:
-      - broker-1
-      - broker-2
-      - broker-3
-    networks:
-      - pubsub-net
-
-  subscriber-1:
-    build: .
-    command: python subscriber.py --id sub-1 --bootstrap bootstrap:4000 --topics weather
-    depends_on:
-      - broker-1
-    networks:
-      - pubsub-net
-
-networks:
-  pubsub-net:
-    driver: bridge
-```
-
-### 1.3 — Verify Everything Works
+### 1.3 — Verify Everything Works ✅
 
 ```bash
-docker-compose up --build
-# Watch logs: brokers should discover each other, publishers should start sending,
-# subscribers should start receiving.
+make demo     # Build, start, wait 20s, query all /status endpoints
+make status   # Query /status from every component
+make logs     # Tail all container logs
+make clean    # Tear down everything
 ```
 
-Fix any networking issues. The most common problem: your code might be using `localhost` to connect to peers, but in Docker, each container has its own network namespace. Brokers need to connect using container names (e.g., `broker-2:5002`) or IPs on the Docker bridge network. Your bootstrap server's registry needs to store addresses that are resolvable across containers.
-
-### 1.4 — Add a Demo Make Target
+### 1.4 — Make Targets ✅
 
 ```makefile
-# Makefile
-.PHONY: demo clean
-
-demo:
-	docker-compose up --build -d
-	@echo "Waiting for system to stabilize..."
-	sleep 10
-	@echo "System running. Publishing messages..."
-	docker exec pubsub-publisher-1 python trigger_demo.py
-	@echo "Triggering Chandy-Lamport snapshot..."
-	docker exec pubsub-broker-1 python trigger_snapshot.py
-	@echo "Snapshot results:"
-	docker exec pubsub-broker-1 cat /tmp/snapshot_output.json | python -m json.tool
-
-clean:
-	docker-compose down -v
+# Current Makefile targets:
+make demo     # Build images, start system, wait for stabilization, print status
+make status   # Query /status from all 9 components (bootstrap + 3 brokers + 3 subscribers + 2 publishers)
+make logs     # Tail logs from all containers
+make clean    # Stop and remove all containers, networks, and volumes
+make test     # Run integration test (no Docker)
 ```
 
-**Deliverable:** `docker-compose up` spins up the entire distributed system. `make demo` runs a full demo with message publishing and a snapshot. Everything works across containers on a Docker network.
+**Deliverable:** `make demo` spins up the entire distributed system across 9 containers (1 bootstrap, 3 brokers, 3 subscribers, 2 publishers). Every component has its own `/status` endpoint. `make status` queries all 9 endpoints. Everything works across containers on a Docker bridge network.
 
 ---
 

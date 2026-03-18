@@ -16,8 +16,15 @@ from pubsub.core.payload_range import PayloadRange
 from pubsub.core.uint8 import UInt8
 from pubsub.gossip.bootstrap import BootstrapServer
 from pubsub.gossip.broker import GossipBroker
-from pubsub.gossip.status import BootstrapStatusServer, StatusServer
+from pubsub.gossip.status import (
+    BootstrapStatusServer,
+    PublisherStatusServer,
+    StatusServer,
+    SubscriberStatusServer,
+)
 from pubsub.network.node import NodeAddress
+from pubsub.network.publisher import NetworkPublisher
+from pubsub.network.subscriber import NetworkSubscriber
 
 
 def _free_port() -> int:
@@ -285,6 +292,204 @@ class TestBootstrapStatusServer(unittest.TestCase):
         finally:
             server.stop()
             bootstrap.network.close()
+
+
+class TestSubscriberStatusServer(unittest.TestCase):
+    """Tests for SubscriberStatusServer / _SubscriberStatusHandler."""
+
+    def _make_subscriber_and_server(
+        self,
+    ) -> tuple[NetworkSubscriber, SubscriberStatusServer, int]:
+        """Create a subscriber and a status server on free ports."""
+        sub_port = _free_port()
+        status_port = _free_port()
+        sub = NetworkSubscriber(NodeAddress("127.0.0.1", sub_port))
+        sub._status_port = status_port
+        server = SubscriberStatusServer(sub, status_port)
+        return sub, server, status_port
+
+    # ------------------------------------------------------------------ #
+    # Test 9 — basic HTTP response shape                                   #
+    # ------------------------------------------------------------------ #
+
+    def test_status_returns_200_json(self) -> None:
+        """GET /status returns HTTP 200 with Content-Type: application/json."""
+        sub, server, port = self._make_subscriber_and_server()
+        server.start()
+        try:
+            resp, data = _get(port, "/status")
+            self.assertEqual(resp.status, 200)
+            ct = resp.headers.get("Content-Type", "")
+            self.assertIn("application/json", ct)
+            self.assertIsInstance(data, dict)
+        finally:
+            server.stop()
+            sub.node.close()
+
+    # ------------------------------------------------------------------ #
+    # Test 10 — all expected top-level keys present                        #
+    # ------------------------------------------------------------------ #
+
+    def test_status_fields_shape(self) -> None:
+        """Response contains all required top-level keys with correct types."""
+        sub, server, port = self._make_subscriber_and_server()
+        server.start()
+        try:
+            _, data = _get(port, "/status")
+            required_keys = {
+                "subscriber",
+                "host",
+                "port",
+                "status_port",
+                "broker",
+                "subscriptions",
+                "total_received",
+                "running",
+                "uptime_seconds",
+            }
+            missing = required_keys - data.keys()
+            self.assertEqual(missing, set(), f"Missing keys: {missing}")
+
+            self.assertIsInstance(data["subscriptions"], list)
+            self.assertIsInstance(data["total_received"], int)
+            self.assertIsInstance(data["running"], bool)
+            self.assertIsInstance(data["uptime_seconds"], float)
+        finally:
+            server.stop()
+            sub.node.close()
+
+    # ------------------------------------------------------------------ #
+    # Test 11 — live state is reflected correctly                          #
+    # ------------------------------------------------------------------ #
+
+    def test_status_reflects_live_state(self) -> None:
+        """Mutating subscriber state is immediately visible in /status."""
+        sub, server, port = self._make_subscriber_and_server()
+        server.start()
+        try:
+            # Baseline — no broker, not running
+            _, before = _get(port, "/status")
+            self.assertIsNone(before["broker"])
+            self.assertFalse(before["running"])
+            self.assertEqual(before["total_received"], 0)
+
+            # Connect to a broker and start
+            broker_addr = NodeAddress("127.0.0.1", _free_port())
+            sub.connect_to_broker(broker_addr)
+            sub.running = True
+            sub.total_received = 42
+
+            _, after = _get(port, "/status")
+            self.assertEqual(after["broker"], str(broker_addr))
+            self.assertTrue(after["running"])
+            self.assertEqual(after["total_received"], 42)
+        finally:
+            server.stop()
+            sub.node.close()
+
+    # ------------------------------------------------------------------ #
+    # Test 12 — unknown paths return 404                                   #
+    # ------------------------------------------------------------------ #
+
+    def test_unknown_path_returns_404(self) -> None:
+        """GET on any path other than /status returns HTTP 404."""
+        sub, server, port = self._make_subscriber_and_server()
+        server.start()
+        try:
+            for bad_path in ("/", "/health", "/metrics"):
+                resp, data = _get(port, bad_path)
+                self.assertEqual(resp.status, 404)
+                self.assertIsInstance(data, dict)
+                self.assertIn("error", data)
+        finally:
+            server.stop()
+            sub.node.close()
+
+
+class TestPublisherStatusServer(unittest.TestCase):
+    """Tests for PublisherStatusServer / _PublisherStatusHandler."""
+
+    def _make_publisher_and_server(
+        self,
+    ) -> tuple[NetworkPublisher, PublisherStatusServer, int]:
+        """Create a publisher and a status server on free ports."""
+        pub_port = _free_port()
+        status_port = _free_port()
+        broker_addr = NodeAddress("127.0.0.1", _free_port())
+        pub = NetworkPublisher(
+            NodeAddress("127.0.0.1", pub_port),
+            [broker_addr],
+        )
+        pub._status_port = status_port
+        server = PublisherStatusServer(pub, status_port)
+        return pub, server, status_port
+
+    # ------------------------------------------------------------------ #
+    # Test 13 — basic HTTP response shape                                  #
+    # ------------------------------------------------------------------ #
+
+    def test_status_returns_200_json(self) -> None:
+        """GET /status returns HTTP 200 with Content-Type: application/json."""
+        pub, server, port = self._make_publisher_and_server()
+        server.start()
+        try:
+            resp, data = _get(port, "/status")
+            self.assertEqual(resp.status, 200)
+            ct = resp.headers.get("Content-Type", "")
+            self.assertIn("application/json", ct)
+            self.assertIsInstance(data, dict)
+        finally:
+            server.stop()
+            pub.network.close()
+
+    # ------------------------------------------------------------------ #
+    # Test 14 — all expected top-level keys present                        #
+    # ------------------------------------------------------------------ #
+
+    def test_status_fields_shape(self) -> None:
+        """Response contains all required top-level keys with correct types."""
+        pub, server, port = self._make_publisher_and_server()
+        server.start()
+        try:
+            _, data = _get(port, "/status")
+            required_keys = {
+                "publisher",
+                "host",
+                "port",
+                "status_port",
+                "brokers",
+                "broker_count",
+                "total_sent",
+                "uptime_seconds",
+            }
+            missing = required_keys - data.keys()
+            self.assertEqual(missing, set(), f"Missing keys: {missing}")
+
+            self.assertIsInstance(data["brokers"], list)
+            self.assertIsInstance(data["broker_count"], int)
+            self.assertIsInstance(data["total_sent"], int)
+            self.assertIsInstance(data["uptime_seconds"], float)
+        finally:
+            server.stop()
+            pub.network.close()
+
+    # ------------------------------------------------------------------ #
+    # Test 15 — unknown paths return 404                                   #
+    # ------------------------------------------------------------------ #
+
+    def test_unknown_path_returns_404(self) -> None:
+        """GET on any path other than /status returns HTTP 404."""
+        pub, server, port = self._make_publisher_and_server()
+        server.start()
+        try:
+            for bad_path in ("/", "/health", "/metrics"):
+                resp, data = _get(port, bad_path)
+                self.assertEqual(resp.status, 404)
+                self.assertIsInstance(data, dict)
+                self.assertIn("error", data)
+        finally:
+            server.stop()
+            pub.network.close()
 
 
 if __name__ == "__main__":

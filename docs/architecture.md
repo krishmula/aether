@@ -4,32 +4,43 @@
 
 This is a distributed publish-subscribe system built on a gossip protocol with Chandy-Lamport distributed snapshots for fault tolerance. Messages carry a single `UInt8` payload (0–255) and are routed to subscribers based on `PayloadRange` subscriptions.
 
-```
-┌────────────┐         ┌────────────┐
-│ Publisher 1 │         │ Publisher N │
-└─────┬──────┘         └─────┬──────┘
-      │ GossipMessage          │
-      │ (redundancy=2)         │
-      ▼                        ▼
-┌──────────┐  gossip   ┌──────────┐  gossip   ┌──────────┐
-│ Broker 1 │◄────────►│ Broker 2 │◄────────►│ Broker 3 │
-│          │  heartbeat│          │  heartbeat│          │
-│          │  snapshot │          │  snapshot │          │
-└────┬─────┘  markers  └────┬─────┘  markers  └────┬─────┘
-     │                      │                      │
-     │ PayloadMessage       │ PayloadMessage       │ PayloadMessage
-     │ Delivery             │ Delivery             │ Delivery
-     ▼                      ▼                      ▼
-┌─────────┐           ┌─────────┐           ┌─────────┐
-│ Sub 1,2 │           │ Sub 3,4 │           │ Sub 5,6 │
-└─────────┘           └─────────┘           └─────────┘
+**Every component runs as its own process** with its own TCP socket (`NetworkNode`) and its own HTTP `/status` endpoint. This one-process-per-component model is the foundation for containerization: each process maps 1:1 to a Docker container.
 
-                  ┌───────────────┐
-                  │   Bootstrap   │
-                  │    Server     │
-                  └───────────────┘
-                  (peer discovery)
 ```
+                         ┌───────────────┐
+                         │   Bootstrap   │
+                         │    Server     │
+                         │  :7000 / :17000│
+                         └───────┬───────┘
+                                 │ MembershipUpdate
+          ┌──────────────────────┼──────────────────────┐
+          │                      │                      │
+          ▼                      ▼                      ▼
+   ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+   │  Broker 1   │◄─────►│  Broker 2   │◄─────►│  Broker 3   │
+   │  :8000      │ gossip│  :8000      │ gossip│  :8000      │
+   │  :18000     │  hb   │  :18000     │  hb   │  :18000     │
+   └──┬──────┬───┘ snap  └──┬──────┬───┘ snap  └──┬──────┬───┘
+      │      │              │      │              │      │
+      │      │              │      │              │      │
+      ▼      │              ▼      │              ▼      │
+ ┌────────┐  │         ┌────────┐  │         ┌────────┐  │
+ │ Sub 0  │  │         │ Sub 1  │  │         │ Sub 2  │  │
+ │ :10000 │  │         │ :10001 │  │         │ :10002 │  │
+ │ :20000 │  │         │ :20001 │  │         │ :20002 │  │
+ └────────┘  │         └────────┘  │         └────────┘  │
+             │                     │                     │
+             ▼                     ▼                     ▼
+        ┌────────┐           ┌────────┐           ┌────────┐
+        │ Pub 0  │           │ Pub 1  │           │        │
+        │ :9000  │           │ :9001  │           │        │
+        │ :19000 │           │ :19001 │           │        │
+        └────────┘           └────────┘           └────────┘
+```
+
+**Port convention:** Every component exposes two ports:
+- **TCP port** — for the `NetworkNode` (gossip, subscriptions, message delivery)
+- **HTTP status port** — `tcp_port + 10000`, serves `GET /status` with live JSON state
 
 ---
 
@@ -57,6 +68,8 @@ This is a distributed publish-subscribe system built on a gossip protocol with C
 |---|---|---|
 | `pubsub.network.node` | `NodeAddress` | `(host, port)` identity. Normalizes hostnames via DNS resolution for consistent hashing/equality. |
 | `pubsub.network.node` | `NetworkNode` | TCP server + persistent connection manager. Handles accept, connect, send, receive. Messages are length-prefixed (4B big-endian) + pickled. Connections are identified via `_IdentificationMessage`. |
+| `pubsub.network.publisher` | `NetworkPublisher` | Wraps a `NetworkNode`. Publishes by creating a `GossipMessage` and sending to N random brokers (configurable redundancy). Has `_start_time` for uptime tracking and `_status_port` for the HTTP status endpoint. |
+| `pubsub.network.subscriber` | `NetworkSubscriber` | Wraps a `Subscriber` + `NetworkNode`. Sends `SubscribeRequest`, receives `PayloadMessageDelivery`, handles `BrokerRecoveryNotification`. Has `_start_time` for uptime tracking and `_status_port` for the HTTP status endpoint. |
 
 ### Gossip Protocol Messages
 
@@ -92,8 +105,23 @@ All defined in `pubsub.snapshot`:
 |---|---|---|
 | `pubsub.gossip.bootstrap` | `BootstrapServer` | Peer discovery service. Brokers send any message to register; bootstrap broadcasts a `MembershipUpdate` to all registered brokers. |
 | `pubsub.gossip.broker` | `GossipBroker` | Full-featured broker: gossip relay, heartbeat liveness, remote subscriber management, Chandy-Lamport snapshots, snapshot replication, and recovery. |
-| `pubsub.network.publisher` | `NetworkPublisher` | Wraps a `NetworkNode`. Publishes by creating a `GossipMessage` and sending to N random brokers (configurable redundancy). |
-| `pubsub.network.subscriber` | `NetworkSubscriber` | Wraps a `Subscriber` + `NetworkNode`. Sends `SubscribeRequest`, receives `PayloadMessageDelivery`, handles `BrokerRecoveryNotification`. |
+
+### HTTP Status Endpoints
+
+All four component types expose a `GET /status` endpoint that returns live JSON state. Each runs on `component_port + 10000` by default.
+
+| Module | Class | Serves | Response Fields |
+|---|---|---|---|
+| `pubsub.gossip.status` | `StatusServer` | `GossipBroker` | `broker`, `host`, `port`, `status_port`, `peers`, `peer_count`, `subscribers`, `messages_processed`, `seen_message_ids`, `uptime_seconds`, `snapshot_state` |
+| `pubsub.gossip.status` | `BootstrapStatusServer` | `BootstrapServer` | `host`, `port`, `status_port`, `registered_brokers`, `broker_count`, `uptime_seconds` |
+| `pubsub.gossip.status` | `SubscriberStatusServer` | `NetworkSubscriber` | `subscriber`, `host`, `port`, `status_port`, `broker`, `subscriptions`, `total_received`, `running`, `uptime_seconds` |
+| `pubsub.gossip.status` | `PublisherStatusServer` | `NetworkPublisher` | `publisher`, `host`, `port`, `status_port`, `brokers`, `broker_count`, `total_sent`, `uptime_seconds` |
+
+All status servers share the same pattern:
+- `ThreadingHTTPServer` on a daemon thread (zero new dependencies)
+- Dynamic handler subclass with component reference injected via class attribute
+- `_send_json()` helper for consistent JSON responses
+- 404 for any path other than `/status`
 
 ### Configuration & Utilities
 
@@ -109,10 +137,16 @@ All defined in `pubsub.snapshot`:
 |---|---|---|
 | `pubsub-admin` | `pubsub.cli.admin` | Single-process local mode (Broker + Subscribers + Publisher in one process). |
 | `pubsub-distributed` | `pubsub.cli.distributed_admin` | All-in-one distributed mode (Bootstrap + Brokers + Subscribers + Publishers, all on localhost). |
-| `pubsub-bootstrap` | `pubsub.cli.run_bootstrap` | Standalone bootstrap server process (for multi-machine deployment). |
-| `pubsub-broker` | `pubsub.cli.run_broker` | Standalone broker process (one per machine). |
-| `pubsub-subscribers` | `pubsub.cli.run_subscribers` | Standalone subscriber launcher (creates all subscribers on this machine). |
-| `pubsub-publishers` | `pubsub.cli.run_publishers` | Standalone publisher launcher (creates all publishers on this machine). |
+| `pubsub-bootstrap` | `pubsub.cli.run_bootstrap` | Standalone bootstrap server. Args: `--host`, `--port`, `--status-port`. |
+| `pubsub-broker` | `pubsub.cli.run_broker` | Standalone broker (one per container). Args: `--broker-id`, `--host`, `--port`, `--status-port`. |
+| `pubsub-subscriber` | `pubsub.cli.run_subscribers` | **One subscriber per process** (truly distributed). Args: `--subscriber-id`, `--host`, `--port`, `--status-port`. |
+| `pubsub-publisher` | `pubsub.cli.run_publishers` | **One publisher per process** (truly distributed). Args: `--publisher-id`, `--host`, `--port`, `--status-port`, `--interval`. |
+
+**Subscriber ID scheme (0-indexed):**
+- Total subscribers = `len(brokers) * subscribers_per_broker`
+- ID `N` maps to broker index `N // subscribers_per_broker`
+- Port = `config.subscriber_base_port + N`
+- Payload range = `partition_payload_space(total)[N % len(ranges)]`
 
 ---
 
@@ -363,9 +397,80 @@ No networking. `Broker.publish(msg)` directly iterates `buckets[msg.payload]` an
 
 ---
 
+### Flow 8: Subscriber/Publisher Lifecycle (Truly Distributed)
+
+Each subscriber and publisher is an independent OS process with its own identity, TCP socket, and HTTP status endpoint.
+
+**Subscriber startup (one process per subscriber):**
+
+```
+pubsub-subscriber --subscriber-id 0 --host sub-0 --config config.yaml
+  │
+  │ 1. Parse CLI args, load config
+  │ 2. Compute: broker = brokers[id // subscribers_per_broker]
+  │             port = base_port + id
+  │             range = partition(total)[id % len(ranges)]
+  │
+  │ 3. Create NetworkSubscriber(NodeAddress(host, port))
+  │    - Binds TCP socket
+  │    - Sets _status_port = port + 10000
+  │
+  │ 4. connect_to_broker(broker_address)
+  │
+  │ 5. subscribe(payload_range) → SubscribeRequest → SubscribeAck
+  │
+  │ 6. start() → launches recv loop thread
+  │
+  │ 7. Create SubscriberStatusServer, start() → HTTP daemon thread
+  │
+  │ 8. Signal handler registered (SIGINT/SIGTERM → stop + sys.exit)
+  │
+  │ 9. Block on while True: sleep(1)
+  │
+  │    GET http://0.0.0.0:20000/status → live JSON
+```
+
+**Publisher startup (one process per publisher):**
+
+```
+pubsub-publisher --publisher-id 0 --host pub-0 --interval 1.0 --config config.yaml
+  │
+  │ 1. Parse CLI args, load config
+  │ 2. Compute: port = base_port + id
+  │
+  │ 3. Create NetworkPublisher(NodeAddress(host, port), all_broker_addrs)
+  │    - Binds TCP socket
+  │    - Sets _status_port = port + 10000
+  │
+  │ 4. Create PublisherStatusServer, start() → HTTP daemon thread
+  │
+  │ 5. Signal handler registered
+  │
+  │ 6. Publish loop:
+  │    while True:
+  │        payload = random UInt8
+  │        publish(Message(payload), redundancy=2)
+  │        sleep(interval)
+  │
+  │    GET http://0.0.0.0:19000/status → live JSON
+```
+
+**Key architectural properties:**
+- Each subscriber/publisher has a **unique identity** (its `NodeAddress`)
+- Each has its **own TCP socket** for communication
+- Each exposes a **`/status` HTTP endpoint** for observability
+- Each can be **independently started, stopped, and monitored**
+- The CLI follows the **same pattern** as `pubsub-broker`: one ID, one process, one container
+
+---
+
 ## Threading Model
 
-Each `GossipBroker.start()` spawns **4 daemon threads**:
+### Per-Container Thread Summary
+
+Each component type spawns a specific set of daemon threads:
+
+**`GossipBroker` (4 threads + status):**
 
 | Thread | Name Pattern | Purpose |
 |---|---|---|
@@ -373,8 +478,33 @@ Each `GossipBroker.start()` spawns **4 daemon threads**:
 | Heartbeat sender | `broker-{port}-hb` | Sends `Heartbeat` to all peers every ~5s |
 | Heartbeat checker | `broker-{port}-check-hb` | Evicts stale peers every ~5s |
 | Snapshot timer | `broker-{port}-snapshot` | Leader initiates periodic snapshots |
+| Status HTTP | `broker-{port}-status-http` | Serves `GET /status` (from `StatusServer`) |
 
-Each `NetworkNode` additionally spawns:
+**`BootstrapServer` (1 thread + status):**
+
+| Thread | Name Pattern | Purpose |
+|---|---|---|
+| Serve loop | `bootstrap-server` | Accepts JOIN requests, broadcasts membership |
+| Status HTTP | `bootstrap-{port}-status-http` | Serves `GET /status` (from `BootstrapStatusServer`) |
+
+**`NetworkSubscriber` (1 thread + status):**
+
+| Thread | Name Pattern | Purpose |
+|---|---|---|
+| Receive loop | `network-subscriber-{port}-recv` | Handles `PayloadMessageDelivery` and `BrokerRecoveryNotification` |
+| Status HTTP | `subscriber-{port}-status-http` | Serves `GET /status` (from `SubscriberStatusServer`) |
+
+**`NetworkPublisher` (0 threads + status):**
+
+| Thread | Name Pattern | Purpose |
+|---|---|---|
+| Status HTTP | `publisher-{port}-status-http` | Serves `GET /status` (from `PublisherStatusServer`) |
+
+The publisher has no background threads — `publish()` is called synchronously from the main loop.
+
+### Per-NetworkNode Threads
+
+Every `NetworkNode` (used by brokers, subscribers, and publishers) additionally spawns:
 
 | Thread | Name Pattern | Purpose |
 |---|---|---|
@@ -382,7 +512,17 @@ Each `NetworkNode` additionally spawns:
 | Per-connection handler | `tcp-handler-{port}-{remote}` | Reads from an accepted connection |
 | Per-outbound handler | (unnamed, daemon) | Reads from an outbound connection |
 
-Each `NetworkSubscriber.start()` spawns **1 daemon thread** for its receive loop.
+### Total Thread Count (Docker Compose Topology)
+
+With the default `docker-compose.yml` (3 brokers, 3 subscribers, 2 publishers, 1 bootstrap):
+
+| Component | Instances | Threads Each | Total |
+|---|---|---|---|
+| Bootstrap | 1 | 4 (serve + 3 TCP) | 4 |
+| Broker | 3 | 8 (4 + status + 3 TCP) | 24 |
+| Subscriber | 3 | 5 (recv + status + 3 TCP) | 15 |
+| Publisher | 2 | 4 (status + 3 TCP) | 8 |
+| **Total** | **9** | | **51** |
 
 ---
 
@@ -399,7 +539,91 @@ Each `NetworkSubscriber.start()` spawns **1 daemon thread** for its receive loop
 ## Deduplication
 
 - Each `GossipMessage` carries a `msg_id` (UUID string)
-- Every broker maintains a `seen_messages: Set[str]` 
+- Every broker maintains a `seen_messages: Set[str]`
 - On receiving a `GossipMessage`, the broker checks `msg_id in seen_messages` — if seen, the message is dropped
 - This prevents infinite loops in the gossip overlay even when `ttl > 0`
 - Snapshots capture a subset of `seen_messages` (capped at 10,000) for continuity after recovery
+
+---
+
+## Status Endpoint Architecture
+
+All four component types expose a `GET /status` endpoint following the same pattern:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    StatusServer Pattern                      │
+│                                                             │
+│  ┌──────────┐    class attr     ┌────────────────────────┐  │
+│  │Component │ ──────────────►  │ Handler (dynamic sub)   │  │
+│  │(broker,  │    injection     │ - do_GET() routes       │  │
+│  │ sub,     │                  │ - _handle_status()      │  │
+│  │ pub,     │                  │ - _send_json()          │  │
+│  │ bootstrap│                  └────────┬───────────────┘  │
+│  └──────────┘                           │                   │
+│       │                                 ▼                   │
+│       │                     ┌──────────────────────┐        │
+│       │                     │ ThreadingHTTPServer   │        │
+│       │                     │ (0.0.0.0:status_port) │        │
+│       │                     └──────────┬───────────┘        │
+│       │                                │                    │
+│       │                     daemon thread (named)           │
+│       │                                │                    │
+│       ▼                                ▼                    │
+│  ┌──────────┐              GET /status → 200 JSON           │
+│  │ _start_  │              GET /*      → 404                │
+│  │  time    │                                                │
+│  └──────────┘                                                │
+│  (uptime tracking)                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Status response examples:**
+
+```jsonc
+// GET http://localhost:18000/status  (Broker)
+{
+  "broker": "broker-1:8000",
+  "host": "broker-1",
+  "port": 8000,
+  "status_port": 18000,
+  "peers": ["broker-2:8000", "broker-3:8000"],
+  "peer_count": 2,
+  "subscribers": {"count": 3},
+  "messages_processed": 1847,
+  "seen_message_ids": 1847,
+  "uptime_seconds": 342.5,
+  "snapshot_state": "idle"
+}
+
+// GET http://localhost:20000/status  (Subscriber)
+{
+  "subscriber": "subscriber-0:10000",
+  "host": "subscriber-0",
+  "port": 10000,
+  "status_port": 20000,
+  "broker": "broker-1:8000",
+  "subscriptions": [{"low": 0, "high": 85}],
+  "total_received": 412,
+  "running": true,
+  "uptime_seconds": 342.1
+}
+
+// GET http://localhost:19000/status  (Publisher)
+{
+  "publisher": "publisher-0:9000",
+  "host": "publisher-0",
+  "port": 9000,
+  "status_port": 19000,
+  "brokers": ["broker-1:8000", "broker-2:8000", "broker-3:8000"],
+  "broker_count": 3,
+  "total_sent": 1230,
+  "uptime_seconds": 341.8
+}
+```
+
+These endpoints are consumed by:
+- **Docker healthchecks** (`curl -sf http://localhost:PORT/status`)
+- **`make status`** (queries all components)
+- **Future orchestration API** (Phase 2)
+- **Future dashboard** (Phase 3)

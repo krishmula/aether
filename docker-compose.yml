@@ -1,0 +1,239 @@
+# docker-compose.yml — Phase 1: one container per process
+#
+# Spin up the full system:
+#   docker-compose up --build
+#
+# Or via the Makefile:
+#   make demo     # start in background, wait, print status
+#   make clean    # tear down everything
+#
+# Networking note:
+#   Each broker is started with --host <container-name> rather than 0.0.0.0.
+#   This is intentional: NodeAddress resolves the hostname to the container's
+#   bridge IP via Docker DNS, so the address the broker advertises to peers
+#   (via _IdentificationMessage) is reachable by those peers.  Passing 0.0.0.0
+#   would cause brokers to advertise an unroutable address to each other.
+
+version: "3.8"
+
+# ── shared config ─────────────────────────────────────────────────────────────
+x-common: &common
+  build: .
+  environment:
+    - PUBSUB_CONFIG=/app/config.docker.yaml
+  volumes:
+    - ./config.docker.yaml:/app/config.docker.yaml:ro
+  networks:
+    - pubsub-net
+  restart: "no"
+
+# ── services ──────────────────────────────────────────────────────────────────
+services:
+
+  # ── bootstrap ───────────────────────────────────────────────────────────────
+  bootstrap:
+    <<: *common
+    container_name: pubsub-bootstrap
+    hostname: bootstrap
+    command: >
+      pubsub-bootstrap
+        --host bootstrap
+        --port 7000
+        --status-port 17000
+        --log-level INFO
+    ports:
+      - "7000:7000"       # TCP peer-discovery
+      - "17000:17000"     # HTTP /status
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:17000/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ── broker-1 ────────────────────────────────────────────────────────────────
+  broker-1:
+    <<: *common
+    container_name: pubsub-broker-1
+    hostname: broker-1
+    command: >
+      pubsub-broker
+        --broker-id 1
+        --host broker-1
+        --port 8000
+        --status-port 18000
+        --log-level INFO
+    ports:
+      - "8001:8000"       # TCP (host 8001 → container 8000)
+      - "18001:18000"     # HTTP /status
+    depends_on:
+      bootstrap:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18000/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ── broker-2 ────────────────────────────────────────────────────────────────
+  broker-2:
+    <<: *common
+    container_name: pubsub-broker-2
+    hostname: broker-2
+    command: >
+      pubsub-broker
+        --broker-id 2
+        --host broker-2
+        --port 8000
+        --status-port 18000
+        --log-level INFO
+    ports:
+      - "8002:8000"
+      - "18002:18000"
+    depends_on:
+      bootstrap:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18000/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ── broker-3 ────────────────────────────────────────────────────────────────
+  broker-3:
+    <<: *common
+    container_name: pubsub-broker-3
+    hostname: broker-3
+    command: >
+      pubsub-broker
+        --broker-id 3
+        --host broker-3
+        --port 8000
+        --status-port 18000
+        --log-level INFO
+    ports:
+      - "8003:8000"
+      - "18003:18000"
+    depends_on:
+      bootstrap:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:18000/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # ── subscriber-0 (subscriber_id=0 → broker-1) ──────────────────────────────
+  subscriber-0:
+    <<: *common
+    container_name: pubsub-subscriber-0
+    hostname: subscriber-0
+    command: >
+      pubsub-subscriber
+        --subscriber-id 0
+        --host subscriber-0
+        --log-level INFO
+    ports:
+      - "10000:10000"
+      - "20000:20000"
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
+
+  # ── subscriber-1 (subscriber_id=1 → broker-2) ──────────────────────────────
+  subscriber-1:
+    <<: *common
+    container_name: pubsub-subscriber-1
+    hostname: subscriber-1
+    command: >
+      pubsub-subscriber
+        --subscriber-id 1
+        --host subscriber-1
+        --log-level INFO
+    ports:
+      - "10001:10001"
+      - "20001:20001"
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
+
+  # ── subscriber-2 (subscriber_id=2 → broker-3) ──────────────────────────────
+  subscriber-2:
+    <<: *common
+    container_name: pubsub-subscriber-2
+    hostname: subscriber-2
+    command: >
+      pubsub-subscriber
+        --subscriber-id 2
+        --host subscriber-2
+        --log-level INFO
+    ports:
+      - "10002:10002"
+      - "20002:20002"
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
+
+  # ── publisher-0 ─────────────────────────────────────────────────────────────
+  publisher-0:
+    <<: *common
+    container_name: pubsub-publisher-0
+    hostname: publisher-0
+    command: >
+      pubsub-publisher
+        --publisher-id 0
+        --host publisher-0
+        --interval 1.0
+        --log-level INFO
+    ports:
+      - "9000:9000"
+      - "19000:19000"
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
+
+  # ── publisher-1 ─────────────────────────────────────────────────────────────
+  publisher-1:
+    <<: *common
+    container_name: pubsub-publisher-1
+    hostname: publisher-1
+    command: >
+      pubsub-publisher
+        --publisher-id 1
+        --host publisher-1
+        --interval 1.0
+        --log-level INFO
+    ports:
+      - "9001:9001"
+      - "19001:19001"
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
+
+# ── network ───────────────────────────────────────────────────────────────────
+networks:
+  pubsub-net:
+    driver: bridge

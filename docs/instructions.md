@@ -82,9 +82,9 @@ pubsub-distributed 3 2 2 --base-port 8000 --publish-interval 0.5 --duration 10 -
 
 ---
 
-## 3. Distributed Mode — Multi-Machine (Config-Based)
+## 3. Distributed Mode — Multi-Machine / Docker (Truly Distributed)
 
-For running across multiple machines (e.g., EC2 instances, Tailscale network). Each component is launched as a separate process using `config.yaml`.
+**Every component runs as its own process** — one per CLI invocation, one per Docker container. Each exposes a `/status` HTTP endpoint for observability.
 
 ### Step 0: Configure `config.yaml`
 
@@ -131,7 +131,7 @@ You can override the config path with the `PUBSUB_CONFIG` environment variable.
 Run **once**, on the machine designated for bootstrap:
 
 ```bash
-pubsub-bootstrap [--config config.yaml] [--host HOST] [--port PORT]
+pubsub-bootstrap [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
 ```
 
 ### Step 2: Start Brokers
@@ -139,7 +139,7 @@ pubsub-bootstrap [--config config.yaml] [--host HOST] [--port PORT]
 Run **one per broker machine**, specifying the broker's ID from the config:
 
 ```bash
-pubsub-broker --broker-id 1 [--config config.yaml] [--host HOST] [--port PORT]
+pubsub-broker --broker-id 1 [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
 ```
 
 Each broker:
@@ -147,19 +147,95 @@ Each broker:
 2. Creates a `GossipBroker` with the configured `fanout`, `ttl`, and `snapshot_interval`
 3. Sends `"JOIN"` to the bootstrap address
 4. Receives a `MembershipUpdate` and adds all peers
-5. Calls `start()`, launching 4 daemon threads
+5. Calls `start()`, launching 4 daemon threads + status HTTP server
 
-### Step 3: Start Subscribers
+### Step 3: Start Subscribers (One Process Per Subscriber)
 
-```bash
-pubsub-subscribers [--config config.yaml]
-```
-
-### Step 4: Start Publishers
+Each subscriber is a **separate process/container** selected by its numeric ID.
 
 ```bash
-pubsub-publishers [--config config.yaml] [--interval SECONDS] [--seed INT]
+pubsub-subscriber --subscriber-id <N> [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
 ```
+
+| Argument | Required | Description |
+|---|---|---|
+| `--subscriber-id` | Yes | 0-indexed subscriber ID (0, 1, 2, ...) |
+| `--config` | No | Path to config file (default: `config.yaml`) |
+| `--host` | No | Override host from config |
+| `--port` | No | Override port from config (default: `base_port + id`) |
+| `--status-port` | No | HTTP status port (default: `port + 10000`) |
+| `--log-level` | No | DEBUG, INFO, WARNING, ERROR |
+| `--log-file` | No | Path for rotating JSON log file |
+
+**ID mapping (0-indexed):**
+- Total subscribers = `len(brokers) * subscribers_per_broker`
+- Subscriber `N` connects to broker at index `N // subscribers_per_broker`
+- Port = `config.subscriber_base_port + N`
+- Payload range = `partition_payload_space(total)[N % len(ranges)]`
+
+**Example with 3 brokers and 1 subscriber per broker:**
+```bash
+# Terminal 1: connects to broker-1 (id=1), port 10000, range [0-85]
+pubsub-subscriber --subscriber-id 0 --host sub-0
+
+# Terminal 2: connects to broker-2 (id=2), port 10001, range [86-170]
+pubsub-subscriber --subscriber-id 1 --host sub-1
+
+# Terminal 3: connects to broker-3 (id=3), port 10002, range [171-255]
+pubsub-subscriber --subscriber-id 2 --host sub-2
+```
+
+### Step 4: Start Publishers (One Process Per Publisher)
+
+Each publisher is a **separate process/container** selected by its numeric ID.
+
+```bash
+pubsub-publisher --publisher-id <N> [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT] [--interval SECONDS] [--seed INT]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `--publisher-id` | Yes | 0-indexed publisher ID (0, 1, 2, ...) |
+| `--config` | No | Path to config file (default: `config.yaml`) |
+| `--host` | No | Override host from config |
+| `--port` | No | Override port (default: `base_port + id`) |
+| `--status-port` | No | HTTP status port (default: `port + 10000`) |
+| `--interval` | No | Seconds between publishes (default: `1.0`) |
+| `--seed` | No | Random seed for reproducibility |
+| `--log-level` | No | DEBUG, INFO, WARNING, ERROR |
+| `--log-file` | No | Path for rotating JSON log file |
+
+**Example with 2 publishers:**
+```bash
+# Terminal 1: port 9000, publishes every 1s
+pubsub-publisher --publisher-id 0 --host pub-0 --interval 1.0
+
+# Terminal 2: port 9001, publishes every 2s
+pubsub-publisher --publisher-id 1 --host pub-1 --interval 2.0
+```
+
+### Docker Compose (Recommended)
+
+The included `docker-compose.yml` automates the entire topology:
+
+```bash
+make demo    # Build, start, wait, query all status endpoints
+make status  # Query /status from every running component
+make logs    # Tail all container logs
+make clean   # Tear down everything
+```
+
+The Docker Compose file creates individual containers for each component:
+- `pubsub-bootstrap` — bootstrap server
+- `pubsub-broker-1`, `pubsub-broker-2`, `pubsub-broker-3` — broker mesh
+- `pubsub-subscriber-0`, `pubsub-subscriber-1`, `pubsub-subscriber-2` — one subscriber per broker
+- `pubsub-publisher-0`, `pubsub-publisher-1` — two publishers targeting all brokers
+
+Each container has:
+- Its own hostname on the Docker bridge network
+- Its own TCP port and status port exposed to the host
+- A healthcheck polling `GET /status`
+- Dependencies on all brokers being healthy before starting
 
 ---
 
@@ -170,6 +246,12 @@ pubsub-publishers [--config config.yaml] [--interval SECONDS] [--seed INT]
 ```bash
 pytest tests/unit/
 ```
+
+The unit test suite includes 15 tests:
+- **5 tests** for `StatusServer` (broker status endpoint)
+- **3 tests** for `BootstrapStatusServer` (bootstrap status endpoint)
+- **4 tests** for `SubscriberStatusServer` (subscriber status endpoint)
+- **3 tests** for `PublisherStatusServer` (publisher status endpoint)
 
 ### Individual Integration/Scenario Tests
 
@@ -198,13 +280,21 @@ python tests/integration/test_snapshot_full.py
 
 ## 5. Port Allocation Summary
 
-| Component | Default Port(s) | Notes |
-|---|---|---|
-| Bootstrap server | `7000` | Single instance |
-| Brokers | `8000+` | One per broker (`8000`, `8001`, `8002`, ...) |
-| Publishers | `9000+` | One per publisher |
-| Subscribers | `10000+` | One per subscriber |
-| Test scripts | `6001–6003`, `7001–7003`, `8000–8001`, `9000`, `19000` | Various, see each test |
+| Component | TCP Port | HTTP Status Port | Notes |
+|---|---|---|---|
+| Bootstrap | `7000` | `17000` | Single instance |
+| Broker 1 | `8000` | `18000` | `--broker-id 1` |
+| Broker 2 | `8000` | `18000` | `--broker-id 2` (same internal port, different container) |
+| Broker 3 | `8000` | `18000` | `--broker-id 3` |
+| Subscriber 0 | `10000` | `20000` | `--subscriber-id 0` → broker 1 |
+| Subscriber 1 | `10001` | `20001` | `--subscriber-id 1` → broker 2 |
+| Subscriber 2 | `10002` | `20002` | `--subscriber-id 2` → broker 3 |
+| Publisher 0 | `9000` | `19000` | `--publisher-id 0` |
+| Publisher 1 | `9001` | `19001` | `--publisher-id 1` |
+
+**Docker port mappings** (host → container): Brokers use shifted mappings (`8001:8000`, `8002:8000`, etc.) since all broker containers use the same internal port. Subscribers and publishers use 1:1 mappings.
+
+**Convention:** Status port = TCP port + 10000 (configurable via `--status-port`).
 
 ---
 
@@ -225,6 +315,7 @@ python tests/integration/test_snapshot_full.py
 - Sets up gossip parameters: `fanout`, `ttl`, `seen_messages` dedup set
 - Prepares Chandy-Lamport snapshot state (markers, channel recording, peer snapshots)
 - Prepares recovery state (pending requests, received responses)
+- Creates `StatusServer` if `http_port` is provided (started in `start()`)
 
 ### Network Node Initialization (`NetworkNode.__init__`)
 - Binds a TCP socket with `SO_REUSEADDR` on the given `host:port`
@@ -232,6 +323,18 @@ python tests/integration/test_snapshot_full.py
 - Each accepted connection spawns its own handler thread
 - Connections are persistent and bidirectional — identified via `_IdentificationMessage` on first connect
 - Messages are length-prefixed (4-byte big-endian) and serialized with `pickle`
+
+### Subscriber Initialization (`NetworkSubscriber.__init__`)
+- Creates a `Subscriber` (inner 256-element counts array) and a `NetworkNode`
+- Records `_start_time` for uptime tracking
+- `_status_port` set by CLI before starting the status server
+- Lifecycle: `__init__` → `connect_to_broker()` → `subscribe()` → `start()` → (blocking loop) → `stop()`
+
+### Publisher Initialization (`NetworkPublisher.__init__`)
+- Creates a `NetworkNode` with the list of all broker addresses
+- Records `_start_time` for uptime tracking
+- `_status_port` set by CLI before starting the status server
+- Lifecycle: `__init__` → (publish loop) → `close()`
 
 ### Bootstrap Registration Flow
 1. Broker sends any message (e.g., `"JOIN"`) to the bootstrap address
@@ -243,3 +346,11 @@ python tests/integration/test_snapshot_full.py
 1. `NetworkSubscriber` calls `connect_to_broker(addr)` — stores the broker address
 2. Calls `subscribe(PayloadRange)` — sends `SubscribeRequest` and waits for `SubscribeAck` (up to 3 retries, 2s timeout each)
 3. Calls `start()` — launches receive loop thread that handles `PayloadMessageDelivery` and `BrokerRecoveryNotification`
+4. `SubscriberStatusServer.start()` — launches HTTP daemon thread serving `GET /status`
+
+### Publisher Publish Loop
+1. `PublisherStatusServer.start()` — launches HTTP daemon thread serving `GET /status`
+2. Main loop generates random `UInt8` payloads
+3. `publish(Message(payload), redundancy=2)` creates a `GossipMessage` with UUID `msg_id`
+4. Sends to 2 random brokers, tracking `total_sent`
+5. Sleeps for `--interval` seconds, repeats until SIGINT/SIGTERM

@@ -1,7 +1,8 @@
 import logging
 import random
+import time
 import uuid
-from typing import List
+from typing import List, Optional
 
 from pubsub.core.message import Message
 from pubsub.gossip.protocol import GossipMessage
@@ -23,6 +24,9 @@ class NetworkPublisher:
         self.broker_addresses = broker_addresses
         self.ttl = ttl
         self.log = BoundLogger(logger, {"publisher": str(address)})
+        self.total_sent = 0
+        self._start_time: float = time.time()
+        self._status_port: Optional[int] = None
 
     def publish(self, msg: Message, redundancy: int = 2) -> int:
         """Publish a message to multiple brokers for redundancy.
@@ -48,6 +52,7 @@ class NetworkPublisher:
         for broker_addr in targets:
             try:
                 self.network.send(gossip_msg, broker_addr)
+                self.total_sent += 1
                 self.log.debug(
                     "published payload=%d msg_id=%s -> %s",
                     msg.payload,

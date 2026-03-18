@@ -1,0 +1,51 @@
+# config.docker.yaml — used exclusively by docker-compose.yml
+#
+# Container hostnames (bootstrap, broker-1, broker-2, broker-3) are
+# resolved by Docker's internal DNS on the pubsub-net bridge network.
+# Publishers and subscribers also run as containers on the same network.
+
+# Bootstrap server
+bootstrap:
+  host: "bootstrap"
+  port: 7000
+
+# Brokers — one per container; host = Docker service name
+brokers:
+  - id: 1
+    host: "broker-1"
+    port: 8000
+  - id: 2
+    host: "broker-2"
+    port: 8000
+  - id: 3
+    host: "broker-3"
+    port: 8000
+
+# Subscribers (one container running pubsub-subscribers)
+subscribers:
+  local_host: "subscribers"
+  base_port: 10000
+  count_per_broker: 1
+
+# Publishers (one container running pubsub-publishers)
+publishers:
+  local_host: "publishers"
+  base_port: 9000
+  count: 2
+
+# Gossip protocol
+gossip:
+  fanout: 2
+  ttl: 3
+  heartbeat_interval: 5.0
+  heartbeat_timeout: 15.0
+
+# Snapshot
+snapshot:
+  interval: 30.0
+
+# Logging — JSON to stdout works best with Docker log drivers
+logging:
+  level: INFO
+  log_file: null
+  json_console: true
