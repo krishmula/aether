@@ -21,7 +21,7 @@ brokers:
     host: "broker-3"
     port: 8000
 
-# Subscribers (one container running pubsub-subscribers)
+# Subscribers (one container per subscriber process)
 subscribers:
   local_host: "subscribers"
   base_port: 10000

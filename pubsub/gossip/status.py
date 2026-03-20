@@ -54,7 +54,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
         with broker._lock:
             peers = [str(p) for p in broker.peer_brokers]
             subscriber_count = len(broker._remote_subscribers)
-            seen_count = len(broker.seen_messages)
+            seen_count = len(broker._seen_set)
             snapshot_state = (
                 "recording" if broker._snapshot_in_progress is not None else "idle"
             )

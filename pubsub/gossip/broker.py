@@ -3,6 +3,7 @@ import random
 import threading
 import time
 import uuid
+from collections import deque
 from typing import Dict, List, Optional, Set
 
 from pubsub.core.broker import Broker
@@ -58,7 +59,9 @@ class GossipBroker:
         self.peer_brokers: Set[NodeAddress] = set()
         self.last_seen: Dict[NodeAddress, float] = {}
 
-        self.seen_messages: Set[str] = set()
+        self._seen_max = 50_000
+        self._seen_queue: deque[str] = deque(maxlen=self._seen_max)
+        self._seen_set: Set[str] = set()
 
         self._lock = threading.Lock()
 
@@ -89,6 +92,18 @@ class GossipBroker:
             StatusServer(self, http_port) if http_port is not None else None
         )
 
+    def _seen_add(self, msg_id: str) -> None:
+        """Record a message ID. Must be called under self._lock.
+
+        When the deque is full, the oldest ID is automatically evicted
+        (via maxlen) and we remove it from the set to keep them in sync.
+        """
+        if len(self._seen_queue) == self._seen_max:
+            evicted = self._seen_queue[0]  # will be popped by deque
+            self._seen_set.discard(evicted)
+        self._seen_queue.append(msg_id)
+        self._seen_set.add(msg_id)
+
     def register(self, subscriber: Subscriber, payload_range: PayloadRange) -> None:
         self._local_broker.register(subscriber, payload_range)
 
@@ -98,10 +113,13 @@ class GossipBroker:
     def add_peer(self, peer: NodeAddress) -> None:
         if peer != self.address:
             with self._lock:
+                is_new = peer not in self.peer_brokers
                 self.peer_brokers.add(peer)
-                if peer not in self.last_seen:
-                    self.last_seen[peer] = time.time()
-            self.log.info("peer added: %s", peer)
+                self.last_seen[peer] = time.time()
+            if is_new:
+                self.log.info("peer discovered: %s", peer)
+            else:
+                self.log.debug("peer heartbeat: %s", peer)
 
     def start(self) -> None:
         self.running = True
@@ -160,11 +178,11 @@ class GossipBroker:
         token = bind_msg_id(gossip_msg.msg_id)
         try:
             with self._lock:
-                if gossip_msg.msg_id in self.seen_messages:
+                if gossip_msg.msg_id in self._seen_set:
                     self.log.debug("duplicate message, skipping")
                     return
 
-                self.seen_messages.add(gossip_msg.msg_id)
+                self._seen_add(gossip_msg.msg_id)
                 self._messages_processed += 1
 
             self._local_broker.publish(gossip_msg.msg)
@@ -234,8 +252,7 @@ class GossipBroker:
         """Capture current broker state for a Chandy-Lamport snapshot.
         Must be called under self._lock to ensure consistency.
         """
-        max_seen_messages = 10000
-        seen_subset = set(list(self.seen_messages)[:max_seen_messages])
+        seen_subset = set(self._seen_queue)
 
         snapshot = BrokerSnapshot(
             snapshot_id=snapshot_id,
@@ -248,7 +265,7 @@ class GossipBroker:
             timestamp=time.time(),
         )
 
-        self.log.info(
+        self.log.debug(
             "local state recorded snapshot_id=%s subscribers=%d peers=%d",
             snapshot_id[:8],
             len(snapshot.remote_subscribers),
@@ -514,7 +531,7 @@ class GossipBroker:
                     should_initiate = sorted_addresses[0] == self.address
 
             if should_initiate:
-                self.log.info("snapshot timer fired, initiating as leader")
+                self.log.debug("snapshot timer fired, initiating as leader")
                 self.initiate_snapshot()
             else:
                 self.log.debug("snapshot timer fired, not leader — awaiting marker")
@@ -653,7 +670,10 @@ class GossipBroker:
                         self._payload_to_remotes[payload].add(sub_addr)
 
             self.peer_brokers = set(snapshot.peer_brokers)
-            self.seen_messages = set(snapshot.seen_message_ids)
+            self._seen_queue.clear()
+            self._seen_set.clear()
+            for mid in snapshot.seen_message_ids:
+                self._seen_add(mid)
 
             self.log.info(
                 "recovered from snapshot snapshot_id=%s "
@@ -661,7 +681,7 @@ class GossipBroker:
                 snapshot.snapshot_id[:8],
                 len(self._remote_subscribers),
                 len(self.peer_brokers),
-                len(self.seen_messages),
+                len(self._seen_set),
             )
 
         self._reconnect_subscribers(snapshot.broker_address)

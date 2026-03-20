@@ -42,8 +42,8 @@ services:
         --status-port 17000
         --log-level INFO
     ports:
-      - "7000:7000"       # TCP peer-discovery
-      - "17000:17000"     # HTTP /status
+      - "7100:7000"       # TCP peer-discovery (host 7100 → container 7000)
+      - "17100:17000"     # HTTP /status (host 17100 → container 17000)
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:17000/status"]
       interval: 5s
@@ -64,8 +64,8 @@ services:
         --status-port 18000
         --log-level INFO
     ports:
-      - "8001:8000"       # TCP (host 8001 → container 8000)
-      - "18001:18000"     # HTTP /status
+      - "8101:8000"       # TCP (host 8101 → container 8000)
+      - "18101:18000"     # HTTP /status (host 18101 → container 18000)
     depends_on:
       bootstrap:
         condition: service_healthy
@@ -89,8 +89,8 @@ services:
         --status-port 18000
         --log-level INFO
     ports:
-      - "8002:8000"
-      - "18002:18000"
+      - "8102:8000"       # TCP (host 8102 → container 8000)
+      - "18102:18000"     # HTTP /status (host 18102 → container 18000)
     depends_on:
       bootstrap:
         condition: service_healthy
@@ -114,8 +114,8 @@ services:
         --status-port 18000
         --log-level INFO
     ports:
-      - "8003:8000"
-      - "18003:18000"
+      - "8103:8000"       # TCP (host 8103 → container 8000)
+      - "18103:18000"     # HTTP /status (host 18103 → container 18000)
     depends_on:
       bootstrap:
         condition: service_healthy
@@ -137,8 +137,8 @@ services:
         --host subscriber-0
         --log-level INFO
     ports:
-      - "10000:10000"
-      - "20000:20000"
+      - "10100:10000"     # TCP (host 10100 → container 10000)
+      - "20100:20000"     # HTTP /status (host 20100 → container 20000)
     depends_on:
       broker-1:
         condition: service_healthy
@@ -158,8 +158,8 @@ services:
         --host subscriber-1
         --log-level INFO
     ports:
-      - "10001:10001"
-      - "20001:20001"
+      - "10101:10001"     # TCP (host 10101 → container 10001)
+      - "20101:20001"     # HTTP /status (host 20101 → container 20001)
     depends_on:
       broker-1:
         condition: service_healthy
@@ -179,8 +179,8 @@ services:
         --host subscriber-2
         --log-level INFO
     ports:
-      - "10002:10002"
-      - "20002:20002"
+      - "10102:10002"     # TCP (host 10102 → container 10002)
+      - "20102:20002"     # HTTP /status (host 20102 → container 20002)
     depends_on:
       broker-1:
         condition: service_healthy
@@ -201,8 +201,8 @@ services:
         --interval 1.0
         --log-level INFO
     ports:
-      - "9000:9000"
-      - "19000:19000"
+      - "9100:9000"       # TCP (host 9100 → container 9000)
+      - "19100:19000"     # HTTP /status (host 19100 → container 19000)
     depends_on:
       broker-1:
         condition: service_healthy
@@ -223,8 +223,8 @@ services:
         --interval 1.0
         --log-level INFO
     ports:
-      - "9001:9001"
-      - "19001:19001"
+      - "9101:9001"       # TCP (host 9101 → container 9001)
+      - "19101:19001"     # HTTP /status (host 19101 → container 19001)
     depends_on:
       broker-1:
         condition: service_healthy

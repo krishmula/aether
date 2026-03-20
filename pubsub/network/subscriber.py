@@ -179,7 +179,7 @@ class NetworkSubscriber:
             if isinstance(msg, PayloadMessageDelivery):
                 self.total_received += 1
                 self.subscriber.handle_msg(msg.msg)
-                self.log.debug(
+                self.log.info(
                     "received payload=%d from broker %s", msg.msg.payload, sender
                 )
             elif isinstance(msg, BrokerRecoveryNotification):

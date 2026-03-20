@@ -57,8 +57,12 @@ class BootstrapServer:
 
             if sender is not None:
                 with self._lock:
+                    is_new = sender not in self.registered_brokers
                     self.registered_brokers.add(sender)
-                self.log.info("broker registered: %s", sender)
+                if is_new:
+                    self.log.info("broker registered: %s", sender)
+                else:
+                    self.log.debug("broker check-in: %s", sender)
 
             with self._lock:
                 brokers_snapshot = self.registered_brokers.copy()

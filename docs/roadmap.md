@@ -174,6 +174,75 @@ make test     # Run integration test (no Docker)
 
 **Goal:** A FastAPI service that can dynamically create and destroy pub-sub components by managing Docker containers programmatically.
 
+### 2.0 — Prerequisites (Before Building the Orchestrator)
+
+These are changes to the existing pub-sub core that must land before the orchestrator can manage components dynamically. Without them, the orchestrator will fight the existing code.
+
+#### 2.0.1 — Extract Hardcoded Heartbeat Timeout to Config
+
+**Problem:** The heartbeat *interval* is configurable via `config.yaml` (`gossip.heartbeat_interval`), but the peer eviction *timeout* is hardcoded to `15.0` seconds in `_check_heartbeat_loop()` inside `gossip/broker.py`:
+
+```python
+# gossip/broker.py — _check_heartbeat_loop()
+timeout_threshold = 15.0  # magic number, ignores config
+```
+
+Meanwhile, `config.yaml` already has `heartbeat_timeout: 15.0` — it's just never threaded through to the broker. The config field exists, the broker ignores it.
+
+**Why this matters for Phase 2:** The orchestrator will start/stop brokers dynamically. When a broker is removed, its peers need to detect the failure and evict it. If someone tunes `heartbeat_interval` in config (say, to 1s for faster demos) but the timeout stays at 15s, eviction takes way too long. Conversely, if the interval is increased to 10s but the timeout is still 15s, healthy peers get falsely evicted. The interval and timeout must be configured together.
+
+**Fix:** Thread the timeout through the `GossipBroker` constructor, the same way `fanout`, `ttl`, and `snapshot_interval` are already passed:
+
+1. Add `heartbeat_timeout: float = 15.0` parameter to `GossipBroker.__init__()`
+2. Store as `self.heartbeat_timeout`
+3. In `_check_heartbeat_loop()`, replace `timeout_threshold = 15.0` with `self.heartbeat_timeout`
+4. In `cli/run_broker.py`, pass `heartbeat_timeout=config.heartbeat_timeout` to the constructor
+
+This is a 4-line change. The config field already exists — you're just wiring it up.
+
+**Production context:** Every production system (Kafka, Consul, etcd) treats heartbeat interval and timeout as a pair of knobs that operators tune together. Hardcoding one while exposing the other is a classic source of "works on my machine, breaks in staging" bugs.
+
+#### 2.0.2 — Allow Explicit Broker Address for Subscribers
+
+**Problem:** Subscribers are statically assigned to brokers via arithmetic on the subscriber ID in `cli/run_subscribers.py`:
+
+```python
+# cli/run_subscribers.py
+broker_idx = args.subscriber_id // config.subscribers_per_broker
+broker_addr = config.brokers[broker_idx].to_address()
+```
+
+This means subscriber 0 always goes to broker 0, subscriber 1 always goes to broker 0 (if `subscribers_per_broker=2`), etc. The mapping is baked into the CLI and derived from the config file's static broker list.
+
+**Why this matters for Phase 2:** The orchestrator needs to spin up a subscriber and tell it *which* broker to connect to — potentially a broker that was dynamically created and doesn't exist in the original `config.yaml`. The current CLI has no way to do this.
+
+**Fix:** Add `--broker-host` and `--broker-port` CLI args to `run_subscribers.py`. When provided, they override the config-derived broker address:
+
+```python
+parser.add_argument("--broker-host", help="Override broker host (for dynamic orchestration)")
+parser.add_argument("--broker-port", type=int, help="Override broker port (for dynamic orchestration)")
+
+# Later in main():
+if args.broker_host and args.broker_port:
+    broker_addr = NodeAddress(args.broker_host, args.broker_port)
+else:
+    broker_idx = args.subscriber_id // config.subscribers_per_broker
+    broker_addr = config.brokers[broker_idx].to_address()
+```
+
+This is backwards-compatible — existing `docker-compose.yml` commands don't pass these flags, so they keep working. But the orchestrator can now do:
+
+```python
+container = client.containers.run(
+    image="pubsub-core",
+    command=f"pubsub-subscriber --subscriber-id {sid} --host {hostname} "
+            f"--broker-host {broker.host} --broker-port {broker.port}",
+    ...
+)
+```
+
+**Production context:** In Kafka, consumers discover brokers via a bootstrap server list, not via static assignment. In your system, the bootstrap server already exists for broker-to-broker discovery. Long-term, subscribers could use the same mechanism. But for Phase 2, explicit `--broker-host/--broker-port` flags are the pragmatic fix that unblocks the orchestrator without redesigning subscriber discovery.
+
 ### 2.1 — Project Structure
 
 ```
@@ -661,7 +730,103 @@ When a broker dies, its topics need to be redistributed to surviving brokers. Th
 
 This is essentially a simplified version of Kafka's partition reassignment. Implement it and you can say: "Implemented failure detection with heartbeats and automatic topic reassignment, achieving subscriber continuity during broker failures."
 
-### 5.2 — Write-Ahead Log (Medium Priority)
+### 5.2 — Time-Windowed Message Deduplication (High Priority)
+
+Replace the current bounded-deque dedup cache (`_seen_queue` + `_seen_set`) with a proper time-windowed deduplicator. This is how production messaging systems handle deduplication:
+
+- **Google Cloud Pub/Sub**: 10-minute dedup window
+- **AWS SQS**: 5-minute dedup window
+- **Apache Kafka**: offset-based (different model, but consumer group dedup is time-windowed)
+
+**Why time-based, not count-based:** A `deque(maxlen=N)` gives inconsistent guarantees. Under high throughput the window shrinks to seconds (IDs evicted before gossip can finish propagating), under low throughput you waste memory on stale IDs from hours ago. A time-based window gives consistent dedup guarantees regardless of message rate.
+
+**Implementation — `MessageDeduplicator` class:**
+
+```python
+# pubsub/core/dedup.py
+from collections import OrderedDict
+import threading
+import time
+
+class MessageDeduplicator:
+    """Time-windowed, bounded message dedup cache.
+
+    Uses an OrderedDict keyed by msg_id with monotonic timestamps as
+    values.  Entries are insertion-ordered, so expiry sweeps from the
+    front in O(k) where k = number of expired entries.
+
+    Thread-safe — all public methods acquire the internal lock.
+    """
+
+    def __init__(self, window_seconds: float = 300.0, max_entries: int = 100_000):
+        self._window = window_seconds
+        self._max_entries = max_entries
+        self._entries: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def check_and_add(self, msg_id: str) -> bool:
+        """Return True if msg_id is new (not seen within the window).
+
+        Lazily sweeps expired entries on every call.  If the ID is new
+        it is recorded; if it's a duplicate, returns False.
+        """
+        now = time.monotonic()
+        with self._lock:
+            # Sweep: pop from front while oldest entry is past the window
+            cutoff = now - self._window
+            while self._entries:
+                oldest_id, oldest_ts = next(iter(self._entries.items()))
+                if oldest_ts <= cutoff:
+                    self._entries.popitem(last=False)
+                else:
+                    break
+
+            if msg_id in self._entries:
+                return False
+
+            self._entries[msg_id] = now
+
+            # Hard cap as safety valve against pathological bursts
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+            return True
+
+    def __contains__(self, msg_id: str) -> bool:
+        with self._lock:
+            return msg_id in self._entries
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def snapshot_ids(self, limit: int = 10_000) -> set[str]:
+        """Return up to limit most recent IDs for snapshot serialization."""
+        with self._lock:
+            return set(list(self._entries.keys())[-limit:])
+
+    def restore(self, msg_ids: set[str]) -> None:
+        """Bulk-load IDs during recovery. All get current timestamp."""
+        now = time.monotonic()
+        with self._lock:
+            for mid in msg_ids:
+                if mid not in self._entries:
+                    self._entries[mid] = now
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+```
+
+**Key design decisions:**
+
+1. **`time.monotonic()` not `time.time()`** — monotonic clocks aren't affected by NTP adjustments or wall-clock jumps. Production systems always use monotonic clocks for internal timing.
+2. **Lazy sweep** — expired entries are cleaned up on every `check_and_add` call rather than a background thread. Simpler, no extra thread, and amortized O(1) per call.
+3. **Hard cap (`max_entries`)** — safety valve. Even if messages arrive faster than they expire, memory stays bounded.
+4. **`snapshot_ids()` returns the most recent** — when serializing for Chandy-Lamport, you want the newest IDs (most likely to still be in-flight).
+5. **`restore()` uses current timestamp** — recovered IDs get a full window before expiry, preventing duplicate reprocessing after recovery.
+
+**Integration:** Replace `_seen_queue`/`_seen_set` in `GossipBroker` with a single `MessageDeduplicator` instance. The dedup window should be configurable via `config.yaml` under the `gossip` section (e.g., `dedup_window_seconds: 300`).
+
+### 5.3 — Write-Ahead Log (Medium Priority)
 
 Add a simple append-only log per topic on each broker. Before acknowledging a message, write it to disk. On broker restart, replay the log to recover state.
 
@@ -687,11 +852,11 @@ class WriteAheadLog:
 
 This gives you durability. If a broker crashes and restarts, it replays the WAL and recovers. That's how Kafka, PostgreSQL, and every serious database works.
 
-### 5.3 — Message Ordering Guarantees (Medium Priority)
+### 5.4 — Message Ordering Guarantees (Medium Priority)
 
 Add per-topic sequence numbers. Publishers embed a monotonically increasing sequence number. Brokers track the latest sequence per topic. Subscribers can detect gaps and request retransmission. This lets you guarantee exactly-once or at-least-once delivery with ordering.
 
-### 5.4 — Graceful Broker Drain (Lower Priority)
+### 5.5 — Graceful Broker Drain (Lower Priority)
 
 When a broker is being removed (slider goes down), instead of hard-killing it, implement a drain protocol: stop accepting new subscriptions, finish delivering in-flight messages, transfer topics to other brokers, then shut down. This is how real production systems handle rolling deployments.
 
