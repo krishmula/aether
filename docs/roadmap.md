@@ -178,7 +178,9 @@ make test     # Run integration test (no Docker)
 
 These are changes to the existing pub-sub core that must land before the orchestrator can manage components dynamically. Without them, the orchestrator will fight the existing code.
 
-#### 2.0.1 — Extract Hardcoded Heartbeat Timeout to Config
+#### 2.0.1 — Extract Hardcoded Heartbeat Timeout to Config ✅
+
+**Status: Completed** (commit `e42a423`)
 
 **Problem:** The heartbeat *interval* is configurable via `config.yaml` (`gossip.heartbeat_interval`), but the peer eviction *timeout* is hardcoded to `15.0` seconds in `_check_heartbeat_loop()` inside `gossip/broker.py`:
 
@@ -202,7 +204,9 @@ This is a 4-line change. The config field already exists — you're just wiring 
 
 **Production context:** Every production system (Kafka, Consul, etcd) treats heartbeat interval and timeout as a pair of knobs that operators tune together. Hardcoding one while exposing the other is a classic source of "works on my machine, breaks in staging" bugs.
 
-#### 2.0.2 — Allow Explicit Broker Address for Subscribers
+#### 2.0.2 — Allow Explicit Broker Address for Subscribers ✅
+
+**Status: Completed**
 
 **Problem:** Subscribers are statically assigned to brokers via arithmetic on the subscriber ID in `cli/run_subscribers.py`:
 
@@ -242,6 +246,22 @@ container = client.containers.run(
 ```
 
 **Production context:** In Kafka, consumers discover brokers via a bootstrap server list, not via static assignment. In your system, the bootstrap server already exists for broker-to-broker discovery. Long-term, subscribers could use the same mechanism. But for Phase 2, explicit `--broker-host/--broker-port` flags are the pragmatic fix that unblocks the orchestrator without redesigning subscriber discovery.
+
+#### 2.0.3 — CLI Args Bypass Config Validation ✅
+
+**Status: Completed**
+
+The CLI scripts for brokers, publishers, and subscribers previously required their IDs to exist in `config.docker.yaml`, even when `--host` and `--port` were provided via CLI. This blocked the orchestrator from creating components with IDs outside the static config.
+
+**Fixes applied:**
+
+1. **`cli/run_broker.py`**: When `--host` and `--port` are both provided, skip the config broker list lookup entirely. Previously, `broker ID N not found in config` would `sys.exit(1)`.
+
+2. **`cli/run_publishers.py`**: When `--host` and `--port` are both provided, skip the `publisher_count` range validation. Added `--broker-host` (repeatable) and `--broker-port` CLI args so the orchestrator can specify target brokers directly, bypassing `config.broker_addresses`.
+
+3. **`cli/run_subscribers.py`**: Added `--range-low` and `--range-high` CLI args so the orchestrator can assign payload ranges directly, bypassing `partition_payload_space(total_subscribers)` which depends on the config's subscriber count. Also added `--host`/`--port` bypass for config validation (consistent with broker and publisher fixes).
+
+All changes are backwards-compatible — existing `docker-compose.yml` commands don't pass the new args and continue using the config-based paths.
 
 ### 2.1 — Project Structure
 
@@ -527,6 +547,29 @@ orchestrator:
 ```
 
 **Deliverable:** A running FastAPI service at `localhost:9000` with full CRUD for brokers, publishers, and subscribers. `POST /api/brokers` actually spins up a new Docker container. WebSocket at `/ws/events` streams real-time system events. Full Swagger docs at `/docs`.
+
+### 2.6 — Known Limitations & Future Work
+
+#### Hardcoded broker assignments for publishers and subscribers
+
+In Phase 2, publishers and subscribers do **not** discover brokers dynamically. The orchestrator tells each component exactly which broker(s) to connect to via CLI args:
+
+- **Publishers** receive `--broker-host` (repeatable) and `--broker-port` to specify their target brokers.
+- **Subscribers** receive `--broker-host` and `--broker-port` to specify their single parent broker.
+
+Neither publishers nor subscribers talk to the bootstrap server — only brokers do. This is intentional: the orchestrator is the single source of truth for topology, so components don't need independent discovery.
+
+**Consequence:** If a new broker is added after a publisher is already running, that publisher won't know about the new broker. To update a publisher's broker list, the orchestrator would need to tear it down and recreate it.
+
+**Future improvement:** Add a mechanism for publishers/subscribers to receive live broker list updates (e.g., via a control channel from the orchestrator, or by having them query bootstrap periodically).
+
+#### Payload range partitioning is static at creation time
+
+Subscribers receive their payload range via `--range-low` / `--range-high` CLI args. The orchestrator computes ranges using `partition_payload_space(total_subscribers)` at creation time. These ranges are fixed for the lifetime of the subscriber.
+
+**Consequence:** When subscribers are added or removed, existing subscribers keep their original ranges. This can lead to overlapping coverage or gaps in the payload space.
+
+**Future improvement:** When adding/removing subscribers, the orchestrator should tear down all subscribers on the affected broker, repartition the payload space, and recreate them with updated ranges. This ensures clean, non-overlapping coverage at all times.
 
 ---
 

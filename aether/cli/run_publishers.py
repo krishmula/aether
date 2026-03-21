@@ -46,6 +46,18 @@ def main():
         default=None,
         help="Port for the HTTP /status endpoint (default: port + 10000)",
     )
+    parser.add_argument(
+        "--broker-host",
+        action="append",
+        default=None,
+        help="Broker host (repeatable, e.g. --broker-host broker-1 --broker-host broker-2)",
+    )
+    parser.add_argument(
+        "--broker-port",
+        type=int,
+        default=None,
+        help="Broker port (used with --broker-host, same port for all brokers)",
+    )
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -58,20 +70,24 @@ def main():
         json_console=config.log_json_console,
     )
 
-    if args.publisher_id < 0 or args.publisher_id >= config.publisher_count:
-        logger.error(
-            "publisher ID %d out of range [0, %d)",
-            args.publisher_id,
-            config.publisher_count,
-        )
-        sys.exit(1)
+    if args.host and args.port is not None:
+        host = args.host
+        port = args.port
+    else:
+        if args.publisher_id < 0 or args.publisher_id >= config.publisher_count:
+            logger.error(
+                "publisher ID %d out of range [0, %d) — provide --host and --port to bypass",
+                args.publisher_id,
+                config.publisher_count,
+            )
+            sys.exit(1)
 
-    host = args.host or config.publisher_host
-    port = (
-        args.port
-        if args.port is not None
-        else config.publisher_base_port + args.publisher_id
-    )
+        host = args.host or config.publisher_host
+        port = (
+            args.port
+            if args.port is not None
+            else config.publisher_base_port + args.publisher_id
+        )
 
     log_header(f"PUBLISHER {args.publisher_id}")
     logger.info("starting on %s:%d", host, port)
@@ -79,7 +95,12 @@ def main():
     address = NodeAddress(host, port)
     status_port = args.status_port if args.status_port is not None else port + 10000
 
-    broker_addresses = config.broker_addresses
+    if args.broker_host and args.broker_port is not None:
+        broker_addresses = [
+            NodeAddress(h, args.broker_port) for h in args.broker_host
+        ]
+    else:
+        broker_addresses = config.broker_addresses
     publisher = NetworkPublisher(address, broker_addresses, ttl=config.ttl)
     publisher._status_port = status_port
 

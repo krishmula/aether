@@ -19,8 +19,12 @@ def main():
     parser = argparse.ArgumentParser(description="Run Gossip Broker")
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
     parser.add_argument("--broker-id", type=int, required=True, help="Broker ID (1-4)")
-    parser.add_argument("--host", help="Override host from config")
-    parser.add_argument("--port", type=int, help="Override port from config")
+    parser.add_argument(
+        "--host", help="Broker hostname (required if broker ID not in config)"
+    )
+    parser.add_argument(
+        "--port", type=int, help="Broker port (required if broker ID not in config)"
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -45,18 +49,25 @@ def main():
         json_console=config.log_json_console,
     )
 
-    broker_config = None
-    for b in config.brokers:
-        if b.id == args.broker_id:
-            broker_config = b
-            break
+    if args.host and args.port is not None:
+        host = args.host
+        port = args.port
+    else:
+        broker_config = None
+        for b in config.brokers:
+            if b.id == args.broker_id:
+                broker_config = b
+                break
 
-    if broker_config is None:
-        logger.error("broker ID %d not found in config", args.broker_id)
-        sys.exit(1)
+        if broker_config is None:
+            logger.error(
+                "broker ID %d not found in config — provide --host and --port to bypass",
+                args.broker_id,
+            )
+            sys.exit(1)
 
-    host = args.host or broker_config.host
-    port = args.port or broker_config.port
+        host = args.host or broker_config.host
+        port = args.port if args.port is not None else broker_config.port
 
     log_header(f"BROKER {args.broker_id}")
     logger.info("starting on %s:%d", host, port)

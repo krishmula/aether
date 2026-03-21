@@ -8,7 +8,7 @@ import sys
 import time
 
 from aether.config import get_config
-from aether.core.payload_range import partition_payload_space
+from aether.core.payload_range import PayloadRange, partition_payload_space
 from aether.core.uint8 import UInt8
 from aether.gossip.status import SubscriberStatusServer
 from aether.network.node import NodeAddress
@@ -52,6 +52,18 @@ def main():
         default=None,
         help="Override broker port (for dynamic orchestration)",
     )
+    parser.add_argument(
+        "--range-low",
+        type=int,
+        default=None,
+        help="Payload range low bound (0-255, for dynamic orchestration)",
+    )
+    parser.add_argument(
+        "--range-high",
+        type=int,
+        default=None,
+        help="Payload range high bound (0-255, for dynamic orchestration)",
+    )
     args = parser.parse_args()
 
     config = get_config(args.config)
@@ -83,15 +95,22 @@ def main():
         broker_config = config.brokers[broker_idx]
         broker_addr = broker_config.to_address()
 
-    payload_ranges = partition_payload_space(UInt8(total_subscribers))
-    payload_range = payload_ranges[args.subscriber_id % len(payload_ranges)]
+    if args.range_low is not None and args.range_high is not None:
+        payload_range = PayloadRange(UInt8(args.range_low), UInt8(args.range_high))
+    else:
+        payload_ranges = partition_payload_space(UInt8(total_subscribers))
+        payload_range = payload_ranges[args.subscriber_id % len(payload_ranges)]
 
-    host = args.host or config.subscriber_host
-    port = (
-        args.port
-        if args.port is not None
-        else config.subscriber_base_port + args.subscriber_id
-    )
+    if args.host and args.port is not None:
+        host = args.host
+        port = args.port
+    else:
+        host = args.host or config.subscriber_host
+        port = (
+            args.port
+            if args.port is not None
+            else config.subscriber_base_port + args.subscriber_id
+        )
 
     log_header(f"SUBSCRIBER {args.subscriber_id}")
     logger.info("starting on %s:%d", host, port)
