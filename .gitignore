@@ -2,6 +2,15 @@
 *
 !*/
 !*.*
+!Makefile
+!Dockerfile
+!README*
+!LICENSE*
+!CHANGELOG*
+!CONTRIBUTING*
+!CODE_OF_CONDUCT*
+!AUTHORS
+!pyproject.toml
 
 # Ignore references and ideas folders (for the project spec sheet and proposal)
 ref/

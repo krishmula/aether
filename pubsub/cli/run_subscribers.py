@@ -41,6 +41,17 @@ def main():
         default=None,
         help="Port for the HTTP /status endpoint (default: port + 10000)",
     )
+    parser.add_argument(
+        "--broker-host",
+        default=None,
+        help="Override broker host (for dynamic orchestration)",
+    )
+    parser.add_argument(
+        "--broker-port",
+        type=int,
+        default=None,
+        help="Override broker port (for dynamic orchestration)",
+    )
     args = parser.parse_args()
 
     config = get_config(args.config)
@@ -50,21 +61,27 @@ def main():
         json_console=config.log_json_console,
     )
 
+    explicit_broker = args.broker_host is not None and args.broker_port is not None
+
     num_brokers = len(config.brokers)
     total_subscribers = num_brokers * config.subscribers_per_broker
 
-    if args.subscriber_id < 0 or args.subscriber_id >= total_subscribers:
-        logger.error(
-            "subscriber ID %d out of range [0, %d)",
-            args.subscriber_id,
-            total_subscribers,
-        )
-        sys.exit(1)
+    if not explicit_broker:
+        if args.subscriber_id < 0 or args.subscriber_id >= total_subscribers:
+            logger.error(
+                "subscriber ID %d out of range [0, %d)",
+                args.subscriber_id,
+                total_subscribers,
+            )
+            sys.exit(1)
 
-    # Determine broker and payload range from subscriber ID
-    broker_idx = args.subscriber_id // config.subscribers_per_broker
-    broker_config = config.brokers[broker_idx]
-    broker_addr = broker_config.to_address()
+    # Determine broker address: explicit override takes priority over config
+    if explicit_broker:
+        broker_addr = NodeAddress(args.broker_host, args.broker_port)
+    else:
+        broker_idx = args.subscriber_id // config.subscribers_per_broker
+        broker_config = config.brokers[broker_idx]
+        broker_addr = broker_config.to_address()
 
     payload_ranges = partition_payload_space(UInt8(total_subscribers))
     payload_range = payload_ranges[args.subscriber_id % len(payload_ranges)]
@@ -89,15 +106,15 @@ def main():
     success = sub.subscribe(payload_range)
     if success:
         logger.info(
-            "subscribed to broker %d range=[%s-%s]",
-            broker_config.id,
+            "subscribed to broker %s range=[%s-%s]",
+            broker_addr,
             payload_range.low,
             payload_range.high,
         )
     else:
         logger.error(
-            "failed to subscribe to broker %d range=[%s-%s]",
-            broker_config.id,
+            "failed to subscribe to broker %s range=[%s-%s]",
+            broker_addr,
             payload_range.low,
             payload_range.high,
         )
