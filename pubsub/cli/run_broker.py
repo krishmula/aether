@@ -67,6 +67,8 @@ def main():
         address,
         fanout=config.fanout,
         ttl=config.ttl,
+        heartbeat_interval=config.heartbeat_interval,
+        heartbeat_timeout=config.heartbeat_timeout,
         snapshot_interval=config.snapshot_interval,
         http_port=status_port,
     )

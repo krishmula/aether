@@ -41,6 +41,8 @@ class GossipBroker:
         address: NodeAddress,
         fanout: int = 3,
         ttl: int = 5,
+        heartbeat_interval: float = 5.0,
+        heartbeat_timeout: float = 15.0,
         snapshot_interval: float = 15.0,
         http_port: Optional[int] = None,
     ) -> None:
@@ -55,6 +57,8 @@ class GossipBroker:
 
         self.fanout = fanout
         self.ttl = ttl
+        self.heartbeat_interval = heartbeat_interval
+        self.heartbeat_timeout = heartbeat_timeout
 
         self.peer_brokers: Set[NodeAddress] = set()
         self.last_seen: Dict[NodeAddress, float] = {}
@@ -791,8 +795,9 @@ class GossipBroker:
 
     def _heartbeat_loop(self) -> None:
         sequence = 0
+        n_steps = max(1, int(self.heartbeat_interval / 0.1))
         while self.running:
-            for _ in range(50):
+            for _ in range(n_steps):
                 if not self.running:
                     return
                 time.sleep(0.1)
@@ -809,9 +814,9 @@ class GossipBroker:
                     pass
 
     def _check_heartbeat_loop(self) -> None:
-        timeout_threshold = 15.0
+        n_steps = max(1, int(self.heartbeat_interval / 0.1))
         while self.running:
-            for _ in range(50):
+            for _ in range(n_steps):
                 if not self.running:
                     return
                 time.sleep(0.1)
@@ -821,7 +826,7 @@ class GossipBroker:
 
             with self._lock:
                 for peer, last_time in list(self.last_seen.items()):
-                    if current_time - last_time > timeout_threshold:
+                    if current_time - last_time > self.heartbeat_timeout:
                         dead_peers[peer] = last_time
 
                 for peer, last_time in dead_peers.items():
