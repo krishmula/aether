@@ -1,9 +1,9 @@
-# Dockerfile for pub-sub distributed messaging system
+# Dockerfile for aether distributed messaging system
 # Uses Python 3.13 as required by the project
 
 FROM python:3.13-slim
 
-LABEL maintainer="pubsub-system"
+LABEL maintainer="aether-system"
 LABEL description="Distributed publish-subscribe system with gossip protocol and Chandy-Lamport snapshots"
 
 # Set working directory
@@ -16,18 +16,18 @@ RUN apt-get update && apt-get install -y \
 
 # Copy application code first
 COPY pyproject.toml /app/
-COPY pubsub/ /app/pubsub/
+COPY aether/ /app/aether/
 COPY config.docker.yaml /app/
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -e .
 
 # Create non-root user for security
-RUN useradd -m -u 1000 pubsub && chown -R pubsub:pubsub /app
-USER pubsub
+RUN useradd -m -u 1000 aether && chown -R aether:aether /app
+USER aether
 
 # Default command (can be overridden by docker-compose)
-CMD ["python", "-c", "print('Pub-Sub container ready. Use specific entry point like pubsub-broker, pubsub-bootstrap, etc.')"]
+CMD ["python", "-c", "print('Aether container ready. Use specific entry point like aether-broker, aether-bootstrap, etc.')"]
 
 # Health check (uses the status port defined in each component)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \

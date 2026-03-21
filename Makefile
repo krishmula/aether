@@ -1,4 +1,4 @@
-# Makefile for pub-sub distributed messaging system
+# Makefile for aether distributed messaging system
 # Targets documented in docs/instructions.md and docs/roadmap.md
 
 .PHONY: demo status logs clean build test lint up down restart ps check-ports
@@ -29,7 +29,7 @@ ALL_COMPONENTS = $(BOOTSTRAP_NAME) $(BROKER_NAMES) $(SUBSCRIBER_NAMES) $(PUBLISH
 all: help
 
 help:
-	@echo "Pub-Sub Distributed Messaging System"
+	@echo "Aether Distributed Messaging System"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  $(YELLOW)make demo$(NC)     - Build, start, wait 20s, query all status endpoints"
@@ -48,7 +48,7 @@ help:
 	@echo "See docs/instructions.md for detailed usage"
 
 demo: build check-ports
-	@echo "$(YELLOW)Building and starting the full distributed pub-sub system...$(NC)"
+	@echo "$(YELLOW)Building and starting the full distributed aether system...$(NC)"
 	@echo "$(BLUE)This will start:$(NC)"
 	@echo "  - 1 bootstrap server"
 	@echo "  - 3 brokers"
@@ -129,7 +129,7 @@ test:
 lint:
 	@echo "$(YELLOW)Running lint checks...$(NC)"
 	ruff check .
-	mypy pubsub/
+	mypy aether/
 
 # Helper targets
 up:
@@ -174,8 +174,8 @@ install:
 
 local-demo:
 	@echo "$(YELLOW)Running local demo (single process mode)...$(NC)"
-	pubsub-admin 4 --publish-interval 0.05 --duration 2 --seed 123
+	aether-admin 4 --publish-interval 0.05 --duration 2 --seed 123
 
 distributed-demo:
 	@echo "$(YELLOW)Running distributed demo (all-in-one on localhost)...$(NC)"
-	pubsub-distributed 3 2 2 --base-port 8000 --publish-interval 0.5 --duration 10 --seed 42
+	aether-distributed 3 2 2 --base-port 8000 --publish-interval 0.5 --duration 10 --seed 42

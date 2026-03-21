@@ -1,4 +1,4 @@
-"""Unit tests for the HTTP /status endpoints (pubsub.gossip.status).
+"""Unit tests for the HTTP /status endpoints (aether.gossip.status).
 
 Each test spins up a real StatusServer or BootstrapStatusServer bound to an
 ephemeral port in-process, hits it with urllib, and asserts on the response.
@@ -12,19 +12,19 @@ import unittest
 import urllib.error
 import urllib.request
 
-from pubsub.core.payload_range import PayloadRange
-from pubsub.core.uint8 import UInt8
-from pubsub.gossip.bootstrap import BootstrapServer
-from pubsub.gossip.broker import GossipBroker
-from pubsub.gossip.status import (
+from aether.core.payload_range import PayloadRange
+from aether.core.uint8 import UInt8
+from aether.gossip.bootstrap import BootstrapServer
+from aether.gossip.broker import GossipBroker
+from aether.gossip.status import (
     BootstrapStatusServer,
     PublisherStatusServer,
     StatusServer,
     SubscriberStatusServer,
 )
-from pubsub.network.node import NodeAddress
-from pubsub.network.publisher import NetworkPublisher
-from pubsub.network.subscriber import NetworkSubscriber
+from aether.network.node import NodeAddress
+from aether.network.publisher import NetworkPublisher
+from aether.network.subscriber import NetworkSubscriber
 
 
 def _free_port() -> int:

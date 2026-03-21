@@ -27,7 +27,7 @@ def test_basic_tcp():
     """Test basic TCP send/receive between two NetworkNode instances."""
     print("\nTesting basic TCP connection...")
 
-    from pubsub.network.node import NetworkNode, NodeAddress
+    from aether.network.node import NetworkNode, NodeAddress
 
     server_addr = NodeAddress("localhost", 19000)
     client_addr = NodeAddress("localhost", 19001)
@@ -71,9 +71,9 @@ def test_bootstrap():
     """Test bootstrap server peer registration."""
     print("\nTesting bootstrap server...")
 
-    from pubsub.gossip.bootstrap import BootstrapServer
-    from pubsub.gossip.protocol import MembershipUpdate
-    from pubsub.network.node import NetworkNode, NodeAddress
+    from aether.gossip.bootstrap import BootstrapServer
+    from aether.gossip.protocol import MembershipUpdate
+    from aether.network.node import NetworkNode, NodeAddress
 
     bootstrap_addr = NodeAddress("localhost", 19100)
     bootstrap = BootstrapServer(bootstrap_addr)
@@ -129,8 +129,8 @@ def test_broker_start():
     """Test that a broker can start and stop cleanly."""
     print("\nTesting broker start...")
 
-    from pubsub.gossip.broker import GossipBroker
-    from pubsub.network.node import NodeAddress
+    from aether.gossip.broker import GossipBroker
+    from aether.network.node import NodeAddress
 
     broker_addr = NodeAddress("localhost", 19200)
     broker = GossipBroker(broker_addr, fanout=2, ttl=3)
@@ -154,9 +154,9 @@ def test_broker_join_bootstrap():
     """Test brokers discovering each other via bootstrap."""
     print("\nTesting broker join bootstrap...")
 
-    from pubsub.gossip.bootstrap import BootstrapServer
-    from pubsub.gossip.broker import GossipBroker
-    from pubsub.network.node import NodeAddress
+    from aether.gossip.bootstrap import BootstrapServer
+    from aether.gossip.broker import GossipBroker
+    from aether.network.node import NodeAddress
 
     # Start bootstrap
     bootstrap_addr = NodeAddress("localhost", 19300)
@@ -211,10 +211,10 @@ def test_subscriber():
     """Test subscriber connect and subscribe."""
     print("\nTesting subscriber...")
 
-    from pubsub.core.payload_range import PayloadRange
-    from pubsub.gossip.broker import GossipBroker
-    from pubsub.network.node import NodeAddress
-    from pubsub.network.subscriber import NetworkSubscriber
+    from aether.core.payload_range import PayloadRange
+    from aether.gossip.broker import GossipBroker
+    from aether.network.node import NodeAddress
+    from aether.network.subscriber import NetworkSubscriber
 
     # Start broker
     broker_addr = NodeAddress("localhost", 19401)
@@ -256,13 +256,13 @@ def test_end_to_end():
     """Test full message flow: Publisher -> Broker -> Subscriber."""
     print("\nTesting end-to-end message flow...")
 
-    from pubsub.core.message import Message
-    from pubsub.core.payload_range import PayloadRange
-    from pubsub.core.uint8 import UInt8
-    from pubsub.gossip.broker import GossipBroker
-    from pubsub.network.node import NodeAddress
-    from pubsub.network.publisher import NetworkPublisher
-    from pubsub.network.subscriber import NetworkSubscriber
+    from aether.core.message import Message
+    from aether.core.payload_range import PayloadRange
+    from aether.core.uint8 import UInt8
+    from aether.gossip.broker import GossipBroker
+    from aether.network.node import NodeAddress
+    from aether.network.publisher import NetworkPublisher
+    from aether.network.subscriber import NetworkSubscriber
 
     # Start broker
     broker_addr = NodeAddress("localhost", 19601)

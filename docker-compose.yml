@@ -18,11 +18,11 @@
 x-common: &common
   build: .
   environment:
-    - PUBSUB_CONFIG=/app/config.docker.yaml
+    - AETHER_CONFIG=/app/config.docker.yaml
   volumes:
     - ./config.docker.yaml:/app/config.docker.yaml:ro
   networks:
-    - pubsub-net
+    - aether-net
   restart: "no"
 
 # ── services ──────────────────────────────────────────────────────────────────
@@ -30,10 +30,10 @@ services:
   # ── bootstrap ───────────────────────────────────────────────────────────────
   bootstrap:
     <<: *common
-    container_name: pubsub-bootstrap
+    container_name: aether-bootstrap
     hostname: bootstrap
     command: >
-      pubsub-bootstrap
+      aether-bootstrap
         --host bootstrap
         --port 7000
         --status-port 17000
@@ -51,10 +51,10 @@ services:
   # ── broker-1 ────────────────────────────────────────────────────────────────
   broker-1:
     <<: *common
-    container_name: pubsub-broker-1
+    container_name: aether-broker-1
     hostname: broker-1
     command: >
-      pubsub-broker
+      aether-broker
         --broker-id 1
         --host broker-1
         --port 8000
@@ -76,10 +76,10 @@ services:
   # ── broker-2 ────────────────────────────────────────────────────────────────
   broker-2:
     <<: *common
-    container_name: pubsub-broker-2
+    container_name: aether-broker-2
     hostname: broker-2
     command: >
-      pubsub-broker
+      aether-broker
         --broker-id 2
         --host broker-2
         --port 8000
@@ -101,10 +101,10 @@ services:
   # ── broker-3 ────────────────────────────────────────────────────────────────
   broker-3:
     <<: *common
-    container_name: pubsub-broker-3
+    container_name: aether-broker-3
     hostname: broker-3
     command: >
-      pubsub-broker
+      aether-broker
         --broker-id 3
         --host broker-3
         --port 8000
@@ -126,10 +126,10 @@ services:
   # ── subscriber-0 (subscriber_id=0 → broker-1) ──────────────────────────────
   subscriber-0:
     <<: *common
-    container_name: pubsub-subscriber-0
+    container_name: aether-subscriber-0
     hostname: subscriber-0
     command: >
-      pubsub-subscriber
+      aether-subscriber
         --subscriber-id 0
         --host subscriber-0
         --log-level INFO
@@ -147,10 +147,10 @@ services:
   # ── subscriber-1 (subscriber_id=1 → broker-2) ──────────────────────────────
   subscriber-1:
     <<: *common
-    container_name: pubsub-subscriber-1
+    container_name: aether-subscriber-1
     hostname: subscriber-1
     command: >
-      pubsub-subscriber
+      aether-subscriber
         --subscriber-id 1
         --host subscriber-1
         --log-level INFO
@@ -168,10 +168,10 @@ services:
   # ── subscriber-2 (subscriber_id=2 → broker-3) ──────────────────────────────
   subscriber-2:
     <<: *common
-    container_name: pubsub-subscriber-2
+    container_name: aether-subscriber-2
     hostname: subscriber-2
     command: >
-      pubsub-subscriber
+      aether-subscriber
         --subscriber-id 2
         --host subscriber-2
         --log-level INFO
@@ -189,10 +189,10 @@ services:
   # ── publisher-0 ─────────────────────────────────────────────────────────────
   publisher-0:
     <<: *common
-    container_name: pubsub-publisher-0
+    container_name: aether-publisher-0
     hostname: publisher-0
     command: >
-      pubsub-publisher
+      aether-publisher
         --publisher-id 0
         --host publisher-0
         --interval 1.0
@@ -211,10 +211,10 @@ services:
   # ── publisher-1 ─────────────────────────────────────────────────────────────
   publisher-1:
     <<: *common
-    container_name: pubsub-publisher-1
+    container_name: aether-publisher-1
     hostname: publisher-1
     command: >
-      pubsub-publisher
+      aether-publisher
         --publisher-id 1
         --host publisher-1
         --interval 1.0
@@ -232,5 +232,5 @@ services:
 
 # ── network ───────────────────────────────────────────────────────────────────
 networks:
-  pubsub-net:
+  aether-net:
     driver: bridge

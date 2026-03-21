@@ -17,10 +17,10 @@ to the recovered broker.
 import sys
 import time
 
-from pubsub.core.payload_range import PayloadRange
-from pubsub.gossip.broker import GossipBroker
-from pubsub.network.node import NodeAddress
-from pubsub.network.subscriber import NetworkSubscriber
+from aether.core.payload_range import PayloadRange
+from aether.gossip.broker import GossipBroker
+from aether.network.node import NodeAddress
+from aether.network.subscriber import NetworkSubscriber
 
 
 def main():

@@ -50,30 +50,30 @@ This is a distributed publish-subscribe system built on a gossip protocol with C
 
 | Module | Class | Purpose |
 |---|---|---|
-| `pubsub.core.uint8` | `UInt8` | Integer constrained to 0–255. Subclass of `int`. |
-| `pubsub.core.message` | `Message` | Immutable message carrying a single `UInt8` payload. |
-| `pubsub.core.payload_range` | `PayloadRange` | Defines a `[low, high]` range within 0–255. Also has `partition_payload_space(n)` to split 0–255 into N even ranges. |
+| `aether.core.uint8` | `UInt8` | Integer constrained to 0–255. Subclass of `int`. |
+| `aether.core.message` | `Message` | Immutable message carrying a single `UInt8` payload. |
+| `aether.core.payload_range` | `PayloadRange` | Defines a `[low, high]` range within 0–255. Also has `partition_payload_space(n)` to split 0–255 into N even ranges. |
 
 ### Local (In-Process) Layer
 
 | Module | Class | Purpose |
 |---|---|---|
-| `pubsub.core.subscriber` | `Subscriber` | Maintains a 256-element `counts` array. `handle_msg(msg)` increments `counts[msg.payload]`. |
-| `pubsub.core.broker` | `Broker` | In-memory message router. Has 256 subscriber buckets. `register()` maps a subscriber to a `PayloadRange`. `publish(msg)` fans out to all subscribers in `buckets[msg.payload]`. |
-| `pubsub.core.publisher` | `Publisher` | Thin wrapper — calls `broker.publish(msg)`. |
+| `aether.core.subscriber` | `Subscriber` | Maintains a 256-element `counts` array. `handle_msg(msg)` increments `counts[msg.payload]`. |
+| `aether.core.broker` | `Broker` | In-memory message router. Has 256 subscriber buckets. `register()` maps a subscriber to a `PayloadRange`. `publish(msg)` fans out to all subscribers in `buckets[msg.payload]`. |
+| `aether.core.publisher` | `Publisher` | Thin wrapper — calls `broker.publish(msg)`. |
 
 ### Network Layer
 
 | Module | Class | Purpose |
 |---|---|---|
-| `pubsub.network.node` | `NodeAddress` | `(host, port)` identity. Normalizes hostnames via DNS resolution for consistent hashing/equality. |
-| `pubsub.network.node` | `NetworkNode` | TCP server + persistent connection manager. Handles accept, connect, send, receive. Messages are length-prefixed (4B big-endian) + pickled. Connections are identified via `_IdentificationMessage`. |
-| `pubsub.network.publisher` | `NetworkPublisher` | Wraps a `NetworkNode`. Publishes by creating a `GossipMessage` and sending to N random brokers (configurable redundancy). Has `_start_time` for uptime tracking and `_status_port` for the HTTP status endpoint. |
-| `pubsub.network.subscriber` | `NetworkSubscriber` | Wraps a `Subscriber` + `NetworkNode`. Sends `SubscribeRequest`, receives `PayloadMessageDelivery`, handles `BrokerRecoveryNotification`. Has `_start_time` for uptime tracking and `_status_port` for the HTTP status endpoint. |
+| `aether.network.node` | `NodeAddress` | `(host, port)` identity. Normalizes hostnames via DNS resolution for consistent hashing/equality. |
+| `aether.network.node` | `NetworkNode` | TCP server + persistent connection manager. Handles accept, connect, send, receive. Messages are length-prefixed (4B big-endian) + pickled. Connections are identified via `_IdentificationMessage`. |
+| `aether.network.publisher` | `NetworkPublisher` | Wraps a `NetworkNode`. Publishes by creating a `GossipMessage` and sending to N random brokers (configurable redundancy). Has `_start_time` for uptime tracking and `_status_port` for the HTTP status endpoint. |
+| `aether.network.subscriber` | `NetworkSubscriber` | Wraps a `Subscriber` + `NetworkNode`. Sends `SubscribeRequest`, receives `PayloadMessageDelivery`, handles `BrokerRecoveryNotification`. Has `_start_time` for uptime tracking and `_status_port` for the HTTP status endpoint. |
 
 ### Gossip Protocol Messages
 
-All defined in `pubsub.gossip.protocol`:
+All defined in `aether.gossip.protocol`:
 
 | Dataclass | Direction | Purpose |
 |---|---|---|
@@ -88,7 +88,7 @@ All defined in `pubsub.gossip.protocol`:
 
 ### Snapshot & Recovery Messages
 
-All defined in `pubsub.snapshot`:
+All defined in `aether.snapshot`:
 
 | Dataclass | Direction | Purpose |
 |---|---|---|
@@ -103,8 +103,8 @@ All defined in `pubsub.snapshot`:
 
 | Module | Class | Purpose |
 |---|---|---|
-| `pubsub.gossip.bootstrap` | `BootstrapServer` | Peer discovery service. Brokers send any message to register; bootstrap broadcasts a `MembershipUpdate` to all registered brokers. |
-| `pubsub.gossip.broker` | `GossipBroker` | Full-featured broker: gossip relay, heartbeat liveness, remote subscriber management, Chandy-Lamport snapshots, snapshot replication, and recovery. |
+| `aether.gossip.bootstrap` | `BootstrapServer` | Peer discovery service. Brokers send any message to register; bootstrap broadcasts a `MembershipUpdate` to all registered brokers. |
+| `aether.gossip.broker` | `GossipBroker` | Full-featured broker: gossip relay, heartbeat liveness, remote subscriber management, Chandy-Lamport snapshots, snapshot replication, and recovery. |
 
 ### HTTP Status Endpoints
 
@@ -112,10 +112,10 @@ All four component types expose a `GET /status` endpoint that returns live JSON 
 
 | Module | Class | Serves | Response Fields |
 |---|---|---|---|
-| `pubsub.gossip.status` | `StatusServer` | `GossipBroker` | `broker`, `host`, `port`, `status_port`, `peers`, `peer_count`, `subscribers`, `messages_processed`, `seen_message_ids`, `uptime_seconds`, `snapshot_state` |
-| `pubsub.gossip.status` | `BootstrapStatusServer` | `BootstrapServer` | `host`, `port`, `status_port`, `registered_brokers`, `broker_count`, `uptime_seconds` |
-| `pubsub.gossip.status` | `SubscriberStatusServer` | `NetworkSubscriber` | `subscriber`, `host`, `port`, `status_port`, `broker`, `subscriptions`, `total_received`, `running`, `uptime_seconds` |
-| `pubsub.gossip.status` | `PublisherStatusServer` | `NetworkPublisher` | `publisher`, `host`, `port`, `status_port`, `brokers`, `broker_count`, `total_sent`, `uptime_seconds` |
+| `aether.gossip.status` | `StatusServer` | `GossipBroker` | `broker`, `host`, `port`, `status_port`, `peers`, `peer_count`, `subscribers`, `messages_processed`, `seen_message_ids`, `uptime_seconds`, `snapshot_state` |
+| `aether.gossip.status` | `BootstrapStatusServer` | `BootstrapServer` | `host`, `port`, `status_port`, `registered_brokers`, `broker_count`, `uptime_seconds` |
+| `aether.gossip.status` | `SubscriberStatusServer` | `NetworkSubscriber` | `subscriber`, `host`, `port`, `status_port`, `broker`, `subscriptions`, `total_received`, `running`, `uptime_seconds` |
+| `aether.gossip.status` | `PublisherStatusServer` | `NetworkPublisher` | `publisher`, `host`, `port`, `status_port`, `brokers`, `broker_count`, `total_sent`, `uptime_seconds` |
 
 All status servers share the same pattern:
 - `ThreadingHTTPServer` on a daemon thread (zero new dependencies)
@@ -128,19 +128,19 @@ All status servers share the same pattern:
 | Module | Purpose |
 |---|---|
 | `config.yaml` | YAML config for multi-machine deployments (IPs, ports, gossip params, snapshot interval). |
-| `pubsub.config` | Loads `config.yaml` into a `Config` dataclass. Supports `PUBSUB_CONFIG` env override. Provides `get_config()` singleton. |
-| `pubsub.utils.log` | Colored terminal logging: `log_info`, `log_success`, `log_warning`, `log_error`, `log_debug`, `log_network`, `log_system`, `log_separator`, `log_header`. |
+| `aether.config` | Loads `config.yaml` into a `Config` dataclass. Supports `AETHER_CONFIG` env override. Provides `get_config()` singleton. |
+| `aether.utils.log` | Colored terminal logging: `log_info`, `log_success`, `log_warning`, `log_error`, `log_debug`, `log_network`, `log_system`, `log_separator`, `log_header`. |
 
 ### CLI Entry Points
 
 | Command | Module | Purpose |
 |---|---|---|
-| `pubsub-admin` | `pubsub.cli.admin` | Single-process local mode (Broker + Subscribers + Publisher in one process). |
-| `pubsub-distributed` | `pubsub.cli.distributed_admin` | All-in-one distributed mode (Bootstrap + Brokers + Subscribers + Publishers, all on localhost). |
-| `pubsub-bootstrap` | `pubsub.cli.run_bootstrap` | Standalone bootstrap server. Args: `--host`, `--port`, `--status-port`. |
-| `pubsub-broker` | `pubsub.cli.run_broker` | Standalone broker (one per container). Args: `--broker-id`, `--host`, `--port`, `--status-port`. |
-| `pubsub-subscriber` | `pubsub.cli.run_subscribers` | **One subscriber per process** (truly distributed). Args: `--subscriber-id`, `--host`, `--port`, `--status-port`. |
-| `pubsub-publisher` | `pubsub.cli.run_publishers` | **One publisher per process** (truly distributed). Args: `--publisher-id`, `--host`, `--port`, `--status-port`, `--interval`. |
+| `aether-admin` | `aether.cli.admin` | Single-process local mode (Broker + Subscribers + Publisher in one process). |
+| `aether-distributed` | `aether.cli.distributed_admin` | All-in-one distributed mode (Bootstrap + Brokers + Subscribers + Publishers, all on localhost). |
+| `aether-bootstrap` | `aether.cli.run_bootstrap` | Standalone bootstrap server. Args: `--host`, `--port`, `--status-port`. |
+| `aether-broker` | `aether.cli.run_broker` | Standalone broker (one per container). Args: `--broker-id`, `--host`, `--port`, `--status-port`. |
+| `aether-subscriber` | `aether.cli.run_subscribers` | **One subscriber per process** (truly distributed). Args: `--subscriber-id`, `--host`, `--port`, `--status-port`. |
+| `aether-publisher` | `aether.cli.run_publishers` | **One publisher per process** (truly distributed). Args: `--publisher-id`, `--host`, `--port`, `--status-port`, `--interval`. |
 
 **Subscriber ID scheme (0-indexed):**
 - Total subscribers = `len(brokers) * subscribers_per_broker`
@@ -375,7 +375,7 @@ Dead Broker B              Replacement Broker B'         Surviving Peers (A, C)
 ### Flow 7: Local Mode (In-Process)
 
 ```
-pubsub-admin
+aether-admin
   │
   ├── Broker()
   │     └── 256 subscriber buckets (list of sets)
@@ -404,7 +404,7 @@ Each subscriber and publisher is an independent OS process with its own identity
 **Subscriber startup (one process per subscriber):**
 
 ```
-pubsub-subscriber --subscriber-id 0 --host sub-0 --config config.yaml
+aether-subscriber --subscriber-id 0 --host sub-0 --config config.yaml
   │
   │ 1. Parse CLI args, load config
   │ 2. Compute: broker = brokers[id // subscribers_per_broker]
@@ -433,7 +433,7 @@ pubsub-subscriber --subscriber-id 0 --host sub-0 --config config.yaml
 **Publisher startup (one process per publisher):**
 
 ```
-pubsub-publisher --publisher-id 0 --host pub-0 --interval 1.0 --config config.yaml
+aether-publisher --publisher-id 0 --host pub-0 --interval 1.0 --config config.yaml
   │
   │ 1. Parse CLI args, load config
   │ 2. Compute: port = base_port + id
@@ -460,7 +460,7 @@ pubsub-publisher --publisher-id 0 --host pub-0 --interval 1.0 --config config.ya
 - Each has its **own TCP socket** for communication
 - Each exposes a **`/status` HTTP endpoint** for observability
 - Each can be **independently started, stopped, and monitored**
-- The CLI follows the **same pattern** as `pubsub-broker`: one ID, one process, one container
+- The CLI follows the **same pattern** as `aether-broker`: one ID, one process, one container
 
 ---
 

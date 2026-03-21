@@ -1,7 +1,7 @@
-from pubsub.core.payload_range import PayloadRange
-from pubsub.core.uint8 import UInt8
-from pubsub.gossip.broker import GossipBroker
-from pubsub.network.node import NodeAddress
+from aether.core.payload_range import PayloadRange
+from aether.core.uint8 import UInt8
+from aether.gossip.broker import GossipBroker
+from aether.network.node import NodeAddress
 
 
 def test_local_snapshot():

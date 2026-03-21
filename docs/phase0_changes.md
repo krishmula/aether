@@ -14,12 +14,12 @@ All components were already independently launchable via CLI entry points
 registered in `pyproject.toml` before this phase was formally reviewed.
 Audit confirmed:
 
-- `pubsub-broker` → `pubsub/cli/run_broker.py`
-- `pubsub-bootstrap` → `pubsub/cli/run_bootstrap.py`
-- `pubsub-publishers` → `pubsub/cli/run_publishers.py`
-- `pubsub-subscribers` → `pubsub/cli/run_subscribers.py`
-- `pubsub-admin` → `pubsub/cli/admin.py`
-- `pubsub-distributed` → `pubsub/cli/run_distributed.py`
+- `aether-broker` → `aether/cli/run_broker.py`
+- `aether-bootstrap` → `aether/cli/run_bootstrap.py`
+- `aether-publishers` → `aether/cli/run_publishers.py`
+- `aether-subscribers` → `aether/cli/run_subscribers.py`
+- `aether-admin` → `aether/cli/admin.py`
+- `aether-distributed` → `aether/cli/run_distributed.py`
 
 Each CLI accepts `--host`, `--port`, `--config`, `--log-level`, and
 `--log-file` (or equivalent component-specific flags). This is the
@@ -34,7 +34,7 @@ No code changes were required; phase marked complete.
 **Status: Complete (pre-existing work)**
 
 All `print()` calls replaced with Python's `logging` module.
-Implementation in `pubsub/utils/log.py`:
+Implementation in `aether/utils/log.py`:
 
 - `QueueHandler` + `QueueListener` for non-blocking log emission from hot
   paths (broker receive loop, gossip delivery).
@@ -59,7 +59,7 @@ Added lightweight HTTP `/status` endpoints to both the broker and the
 bootstrap server using only stdlib (`http.server.ThreadingHTTPServer`).
 Zero new dependencies.
 
-### New file: `pubsub/gossip/status.py`
+### New file: `aether/gossip/status.py`
 
 Four classes:
 
@@ -74,7 +74,7 @@ Both handlers:
 - Return `200 application/json` on `GET /status`.
 - Return `404 application/json` on any other path.
 - Override `log_message(format, *args)` to redirect HTTP access logs to
-  the `pubsub` logger at `DEBUG` level (the parameter is named `format`
+  the `aether` logger at `DEBUG` level (the parameter is named `format`
   to match the base class signature; `# noqa: A002` suppresses the
   shadowing lint).
 
@@ -112,7 +112,7 @@ progress and `"idle"` otherwise.
 }
 ```
 
-### Modified: `pubsub/gossip/broker.py`
+### Modified: `aether/gossip/broker.py`
 
 New fields on `GossipBroker.__init__`:
 
@@ -129,11 +129,11 @@ self._status_server: Optional[StatusServer] = (
 under `self._lock` (already held there for dedup). `_status_server` is
 started in `start()` and stopped in `stop()`.
 
-Import order fix: `from pubsub.gossip.status import StatusServer` moved
-above the `pubsub.network` import block to satisfy ruff's `I001`
+Import order fix: `from aether.gossip.status import StatusServer` moved
+above the `aether.network` import block to satisfy ruff's `I001`
 (isort) rule.
 
-### Modified: `pubsub/gossip/bootstrap.py`
+### Modified: `aether/gossip/bootstrap.py`
 
 New fields on `BootstrapServer.__init__`:
 
@@ -154,7 +154,7 @@ status handler reads it from a second thread. All mutations of
 
 `_status_server` is started in `start()` and stopped in `stop()`.
 
-### Modified: `pubsub/cli/run_broker.py`
+### Modified: `aether/cli/run_broker.py`
 
 Added `--status-port` argument:
 
@@ -164,7 +164,7 @@ Added `--status-port` argument:
 
 Passed as `http_port` to `GossipBroker(...)`.
 
-### Modified: `pubsub/cli/run_bootstrap.py`
+### Modified: `aether/cli/run_bootstrap.py`
 
 Added `--status-port` argument:
 

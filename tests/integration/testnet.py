@@ -1,5 +1,5 @@
-from pubsub.network.node import NetworkNode, NodeAddress
-from pubsub.utils.log import log_header, log_success
+from aether.network.node import NetworkNode, NodeAddress
+from aether.utils.log import log_header, log_success
 
 log_header("NETWORK TEST")
 

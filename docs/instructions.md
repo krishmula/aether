@@ -15,7 +15,7 @@ The simplest way to run the system. Everything runs in one process with no netwo
 ### Admin Utility
 
 ```bash
-pubsub-admin <subscribers> [--publish-interval SECONDS] [--duration SECONDS] [--seed INT]
+aether-admin <subscribers> [--publish-interval SECONDS] [--duration SECONDS] [--seed INT]
 ```
 
 | Argument | Description |
@@ -28,7 +28,7 @@ pubsub-admin <subscribers> [--publish-interval SECONDS] [--duration SECONDS] [--
 **Example:**
 
 ```bash
-pubsub-admin 4 --publish-interval 0.05 --duration 2 --seed 123
+aether-admin 4 --publish-interval 0.05 --duration 2 --seed 123
 ```
 
 This starts a `Broker`, creates 4 `Subscriber` instances (each covering a slice of 0–255), and launches a background `Publisher` thread that emits random `Message(payload)` values at the given interval. Stats are printed continuously.
@@ -48,7 +48,7 @@ Runs the full distributed stack (bootstrap, brokers, subscribers, publishers) in
 ### Distributed Admin
 
 ```bash
-pubsub-distributed <brokers> <subscribers_per_broker> <publishers> [options]
+aether-distributed <brokers> <subscribers_per_broker> <publishers> [options]
 ```
 
 | Argument | Description |
@@ -64,7 +64,7 @@ pubsub-distributed <brokers> <subscribers_per_broker> <publishers> [options]
 **Example:**
 
 ```bash
-pubsub-distributed 3 2 2 --base-port 8000 --publish-interval 0.5 --duration 10 --seed 42
+aether-distributed 3 2 2 --base-port 8000 --publish-interval 0.5 --duration 10 --seed 42
 ```
 
 **Startup sequence (automated):**
@@ -124,14 +124,14 @@ snapshot:
   interval: 30.0
 ```
 
-You can override the config path with the `PUBSUB_CONFIG` environment variable.
+You can override the config path with the `AETHER_CONFIG` environment variable.
 
 ### Step 1: Start the Bootstrap Server
 
 Run **once**, on the machine designated for bootstrap:
 
 ```bash
-pubsub-bootstrap [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
+aether-bootstrap [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
 ```
 
 ### Step 2: Start Brokers
@@ -139,7 +139,7 @@ pubsub-bootstrap [--config config.yaml] [--host HOST] [--port PORT] [--status-po
 Run **one per broker machine**, specifying the broker's ID from the config:
 
 ```bash
-pubsub-broker --broker-id 1 [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
+aether-broker --broker-id 1 [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
 ```
 
 Each broker:
@@ -154,7 +154,7 @@ Each broker:
 Each subscriber is a **separate process/container** selected by its numeric ID.
 
 ```bash
-pubsub-subscriber --subscriber-id <N> [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
+aether-subscriber --subscriber-id <N> [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT]
 ```
 
 | Argument | Required | Description |
@@ -176,13 +176,13 @@ pubsub-subscriber --subscriber-id <N> [--config config.yaml] [--host HOST] [--po
 **Example with 3 brokers and 1 subscriber per broker:**
 ```bash
 # Terminal 1: connects to broker-1 (id=1), port 10000, range [0-85]
-pubsub-subscriber --subscriber-id 0 --host sub-0
+aether-subscriber --subscriber-id 0 --host sub-0
 
 # Terminal 2: connects to broker-2 (id=2), port 10001, range [86-170]
-pubsub-subscriber --subscriber-id 1 --host sub-1
+aether-subscriber --subscriber-id 1 --host sub-1
 
 # Terminal 3: connects to broker-3 (id=3), port 10002, range [171-255]
-pubsub-subscriber --subscriber-id 2 --host sub-2
+aether-subscriber --subscriber-id 2 --host sub-2
 ```
 
 ### Step 4: Start Publishers (One Process Per Publisher)
@@ -190,7 +190,7 @@ pubsub-subscriber --subscriber-id 2 --host sub-2
 Each publisher is a **separate process/container** selected by its numeric ID.
 
 ```bash
-pubsub-publisher --publisher-id <N> [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT] [--interval SECONDS] [--seed INT]
+aether-publisher --publisher-id <N> [--config config.yaml] [--host HOST] [--port PORT] [--status-port PORT] [--interval SECONDS] [--seed INT]
 ```
 
 | Argument | Required | Description |
@@ -208,10 +208,10 @@ pubsub-publisher --publisher-id <N> [--config config.yaml] [--host HOST] [--port
 **Example with 2 publishers:**
 ```bash
 # Terminal 1: port 9000, publishes every 1s
-pubsub-publisher --publisher-id 0 --host pub-0 --interval 1.0
+aether-publisher --publisher-id 0 --host pub-0 --interval 1.0
 
 # Terminal 2: port 9001, publishes every 2s
-pubsub-publisher --publisher-id 1 --host pub-1 --interval 2.0
+aether-publisher --publisher-id 1 --host pub-1 --interval 2.0
 ```
 
 ### Docker Compose (Recommended)
@@ -226,10 +226,10 @@ make clean   # Tear down everything
 ```
 
 The Docker Compose file creates individual containers for each component:
-- `pubsub-bootstrap` — bootstrap server
-- `pubsub-broker-1`, `pubsub-broker-2`, `pubsub-broker-3` — broker mesh
-- `pubsub-subscriber-0`, `pubsub-subscriber-1`, `pubsub-subscriber-2` — one subscriber per broker
-- `pubsub-publisher-0`, `pubsub-publisher-1` — two publishers targeting all brokers
+- `aether-bootstrap` — bootstrap server
+- `aether-broker-1`, `aether-broker-2`, `aether-broker-3` — broker mesh
+- `aether-subscriber-0`, `aether-subscriber-1`, `aether-subscriber-2` — one subscriber per broker
+- `aether-publisher-0`, `aether-publisher-1` — two publishers targeting all brokers
 
 Each container has:
 - Its own hostname on the Docker bridge network
@@ -302,7 +302,7 @@ python tests/integration/test_snapshot_full.py
 
 | Variable | Description |
 |---|---|
-| `PUBSUB_CONFIG` | Override the config file path (default: `config.yaml`) |
+| `AETHER_CONFIG` | Override the config file path (default: `config.yaml`) |
 
 ---
 

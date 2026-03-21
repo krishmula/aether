@@ -4,8 +4,8 @@
 Launches every component as a real OS process via the installed CLI entry
 points, exercising the full stack:
 
-    pubsub-bootstrap  →  3 × pubsub-broker  →  pubsub-subscribers
-                                             →  pubsub-publishers
+    aether-bootstrap  →  3 × aether-broker  →  aether-subscribers
+                                             →  aether-publishers
 
 Brokers self-assemble via the bootstrap JOIN / MembershipUpdate handshake.
 All assertions are made exclusively through the HTTP /status endpoints —
@@ -274,7 +274,7 @@ def main() -> bool:  # noqa: C901
             print("\n--- Starting bootstrap ---")
             bs_proc = _launch(
                 [
-                    "pubsub-bootstrap",
+                    "aether-bootstrap",
                     "--config",
                     config_path,
                     "--host",
@@ -310,7 +310,7 @@ def main() -> bool:  # noqa: C901
                 sp = broker_status_ports[i]
                 proc = _launch(
                     [
-                        "pubsub-broker",
+                        "aether-broker",
                         "--config",
                         config_path,
                         "--broker-id",
@@ -352,7 +352,7 @@ def main() -> bool:  # noqa: C901
             print("\n--- Starting subscribers ---")
             sub_proc = _launch(
                 [
-                    "pubsub-subscribers",
+                    "aether-subscribers",
                     "--config",
                     config_path,
                     "--log-level",
@@ -386,7 +386,7 @@ def main() -> bool:  # noqa: C901
             print("\n--- Starting publishers ---")
             pub_proc = _launch(
                 [
-                    "pubsub-publishers",
+                    "aether-publishers",
                     "--config",
                     config_path,
                     "--interval",

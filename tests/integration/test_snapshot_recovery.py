@@ -8,9 +8,9 @@ from surviving peers and restore its state.
 
 import time
 
-from pubsub.core.payload_range import PayloadRange
-from pubsub.gossip.broker import GossipBroker
-from pubsub.network.node import NodeAddress
+from aether.core.payload_range import PayloadRange
+from aether.gossip.broker import GossipBroker
+from aether.network.node import NodeAddress
 
 print("=" * 60)
 print("TESTING SNAPSHOT RECOVERY (Phase 6)")

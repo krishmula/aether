@@ -8,9 +8,9 @@
 
 You have a working distributed pub-sub messaging system with:
 
-- **Publishers** — each runs as its own process (`pubsub-publisher --publisher-id N`), owns its own TCP socket and HTTP `/status` endpoint
-- **Brokers** (multiple instances) — each runs as its own process (`pubsub-broker --broker-id N`) with gossip protocol, heartbeats, and Chandy-Lamport snapshots
-- **Subscribers** — each runs as its own process (`pubsub-subscriber --subscriber-id N`), owns its own TCP socket and HTTP `/status` endpoint
+- **Publishers** — each runs as its own process (`aether-publisher --publisher-id N`), owns its own TCP socket and HTTP `/status` endpoint
+- **Brokers** (multiple instances) — each runs as its own process (`aether-broker --broker-id N`) with gossip protocol, heartbeats, and Chandy-Lamport snapshots
+- **Subscribers** — each runs as its own process (`aether-subscriber --subscriber-id N`), owns its own TCP socket and HTTP `/status` endpoint
 - **Bootstrap Server** — centralized peer discovery, its own `/status` endpoint
 - **Socket-based communication** (TCP) between all components via `NetworkNode`
 - **Chandy-Lamport snapshot algorithm** implemented across brokers for consistent global state capture
@@ -47,19 +47,19 @@ All components are independently launchable via CLI entry points registered in `
 
 | Command | Instance | Key Args |
 |---|---|---|
-| `pubsub-bootstrap` | One bootstrap server | `--host`, `--port`, `--status-port` |
-| `pubsub-broker` | One broker | `--broker-id`, `--host`, `--port`, `--status-port` |
-| `pubsub-subscriber` | One subscriber | `--subscriber-id`, `--host`, `--port`, `--status-port` |
-| `pubsub-publisher` | One publisher | `--publisher-id`, `--host`, `--port`, `--status-port`, `--interval` |
+| `aether-bootstrap` | One bootstrap server | `--host`, `--port`, `--status-port` |
+| `aether-broker` | One broker | `--broker-id`, `--host`, `--port`, `--status-port` |
+| `aether-subscriber` | One subscriber | `--subscriber-id`, `--host`, `--port`, `--status-port` |
+| `aether-publisher` | One publisher | `--publisher-id`, `--host`, `--port`, `--status-port`, `--interval` |
 
 All accept `--config`, `--log-level`, and `--log-file` args. Subscriber/publisher IDs are 0-indexed and determine the target broker, port, and payload range automatically.
 
 ```
 # Each component launchable like this (one process = one container)
-pubsub-broker --broker-id 1 --host broker-1 --port 8000 --status-port 18000
-pubsub-subscriber --subscriber-id 0 --host sub-0
-pubsub-publisher --publisher-id 0 --host pub-0 --interval 1.0
-pubsub-bootstrap --host bootstrap --port 7000 --status-port 17000
+aether-broker --broker-id 1 --host broker-1 --port 8000 --status-port 18000
+aether-subscriber --subscriber-id 0 --host sub-0
+aether-publisher --publisher-id 0 --host pub-0 --interval 1.0
+aether-bootstrap --host bootstrap --port 7000 --status-port 17000
 ```
 
 This is the prerequisite for Docker containerization in Phase 1.
@@ -92,7 +92,7 @@ Covered by **15 unit tests** in `tests/unit/test_status.py`: 5 for broker, 3 for
 
 **Status: Completed**
 
-`tests/integration/test_e2e.py` is a subprocess-based integration test that launches real OS processes via CLI entry points (`pubsub-bootstrap`, `pubsub-broker`, `pubsub-subscriber`, `pubsub-publisher`). It starts 1 bootstrap server, 3 brokers in a full mesh, individual subscriber processes, and individual publisher processes; writes a temp `config.yaml` with dynamically allocated ports; polls `/status` HTTP endpoints to verify peer discovery, mesh formation, subscriber registration, message flow, and Chandy-Lamport snapshot completion. All checks pass. Run with `python tests/integration/test_e2e.py`.
+`tests/integration/test_e2e.py` is a subprocess-based integration test that launches real OS processes via CLI entry points (`aether-bootstrap`, `aether-broker`, `aether-subscriber`, `aether-publisher`). It starts 1 bootstrap server, 3 brokers in a full mesh, individual subscriber processes, and individual publisher processes; writes a temp `config.yaml` with dynamically allocated ports; polls `/status` HTTP endpoints to verify peer discovery, mesh formation, subscriber registration, message flow, and Chandy-Lamport snapshot completion. All checks pass. Run with `python tests/integration/test_e2e.py`.
 
 Create a script that programmatically starts the full system, publishes N messages, verifies they're received by subscribers, triggers a snapshot, and validates the snapshot output. This becomes your regression test as you add features.
 
@@ -130,18 +130,18 @@ The `docker-compose.yml` implements the **truly distributed model** — each com
 
 | Service | Container Name | CLI Command |
 |---|---|---|
-| `bootstrap` | `pubsub-bootstrap` | `pubsub-bootstrap --host bootstrap --port 7000 --status-port 17000` |
-| `broker-1` | `pubsub-broker-1` | `pubsub-broker --broker-id 1 --host broker-1 --port 8000 --status-port 18000` |
-| `broker-2` | `pubsub-broker-2` | `pubsub-broker --broker-id 2 --host broker-2 --port 8000 --status-port 18000` |
-| `broker-3` | `pubsub-broker-3` | `pubsub-broker --broker-id 3 --host broker-3 --port 8000 --status-port 18000` |
-| `subscriber-0` | `pubsub-subscriber-0` | `pubsub-subscriber --subscriber-id 0 --host subscriber-0` |
-| `subscriber-1` | `pubsub-subscriber-1` | `pubsub-subscriber --subscriber-id 1 --host subscriber-1` |
-| `subscriber-2` | `pubsub-subscriber-2` | `pubsub-subscriber --subscriber-id 2 --host subscriber-2` |
-| `publisher-0` | `pubsub-publisher-0` | `pubsub-publisher --publisher-id 0 --host publisher-0 --interval 1.0` |
-| `publisher-1` | `pubsub-publisher-1` | `pubsub-publisher --publisher-id 1 --host publisher-1 --interval 1.0` |
+| `bootstrap` | `aether-bootstrap` | `aether-bootstrap --host bootstrap --port 7000 --status-port 17000` |
+| `broker-1` | `aether-broker-1` | `aether-broker --broker-id 1 --host broker-1 --port 8000 --status-port 18000` |
+| `broker-2` | `aether-broker-2` | `aether-broker --broker-id 2 --host broker-2 --port 8000 --status-port 18000` |
+| `broker-3` | `aether-broker-3` | `aether-broker --broker-id 3 --host broker-3 --port 8000 --status-port 18000` |
+| `subscriber-0` | `aether-subscriber-0` | `aether-subscriber --subscriber-id 0 --host subscriber-0` |
+| `subscriber-1` | `aether-subscriber-1` | `aether-subscriber --subscriber-id 1 --host subscriber-1` |
+| `subscriber-2` | `aether-subscriber-2` | `aether-subscriber --subscriber-id 2 --host subscriber-2` |
+| `publisher-0` | `aether-publisher-0` | `aether-publisher --publisher-id 0 --host publisher-0 --interval 1.0` |
+| `publisher-1` | `aether-publisher-1` | `aether-publisher --publisher-id 1 --host publisher-1 --interval 1.0` |
 
 Each container has:
-- Unique hostname on the Docker bridge network (`pubsub-net`)
+- Unique hostname on the Docker bridge network (`aether-net`)
 - Own TCP port and status port exposed to host
 - Healthcheck polling `GET /status` (brokers and bootstrap)
 - Dependencies on broker health before starting (subscribers and publishers)
@@ -234,8 +234,8 @@ This is backwards-compatible — existing `docker-compose.yml` commands don't pa
 
 ```python
 container = client.containers.run(
-    image="pubsub-core",
-    command=f"pubsub-subscriber --subscriber-id {sid} --host {hostname} "
+    image="aether-core",
+    command=f"aether-subscriber --subscriber-id {sid} --host {hostname} "
             f"--broker-host {broker.host} --broker-port {broker.port}",
     ...
 )
@@ -246,7 +246,7 @@ container = client.containers.run(
 ### 2.1 — Project Structure
 
 ```
-pubsub-system/
+aether-system/
 ├── core/                    # Your existing pub-sub code
 │   ├── broker.py
 │   ├── publisher.py
@@ -278,7 +278,7 @@ class DockerManager:
     def __init__(self):
         # Mount the Docker socket so the orchestrator can control Docker
         self.client = docker.from_env()
-        self.network_name = "pubsub-net"
+        self.network_name = "aether-net"
         self.containers = {}  # id -> container info
         self._ensure_network()
 
@@ -295,13 +295,13 @@ class DockerManager:
         port = self._next_available_port("broker")
 
         container = self.client.containers.run(
-            image="pubsub-core",
+            image="aether-core",
             command=f"python broker.py --id {broker_id} --host 0.0.0.0 --port {port} --bootstrap bootstrap:4000",
             name=broker_id,
             network=self.network_name,
             detach=True,
             ports={f"{port}/tcp": port, f"{port + 3000}/tcp": port + 3000},
-            labels={"pubsub.role": "broker", "pubsub.id": broker_id}
+            labels={"aether.role": "broker", "aether.id": broker_id}
         )
 
         self.containers[broker_id] = {
@@ -523,7 +523,7 @@ orchestrator:
     bootstrap:
       condition: service_healthy
   networks:
-    - pubsub-net
+    - aether-net
 ```
 
 **Deliverable:** A running FastAPI service at `localhost:9000` with full CRUD for brokers, publishers, and subscribers. `POST /api/brokers` actually spins up a new Docker container. WebSocket at `/ws/events` streams real-time system events. Full Swagger docs at `/docs`.
@@ -612,7 +612,7 @@ dashboard:
   depends_on:
     - orchestrator
   networks:
-    - pubsub-net
+    - aether-net
 ```
 
 **Deliverable:** A live, interactive dashboard at `localhost:3000`. Sliders dynamically add/remove containers. The topology graph updates in real time. Message flow is visually animated. Chandy-Lamport snapshots visually propagate through the system.
@@ -743,7 +743,7 @@ Replace the current bounded-deque dedup cache (`_seen_queue` + `_seen_set`) with
 **Implementation — `MessageDeduplicator` class:**
 
 ```python
-# pubsub/core/dedup.py
+# aether/core/dedup.py
 from collections import OrderedDict
 import threading
 import time

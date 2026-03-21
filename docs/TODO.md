@@ -7,7 +7,7 @@ Make subscribers network-aware so they can communicate with brokers over UDP soc
 
 ## Phase 1: Define Message Types
 
-Add new dataclasses to `pubsub.gossip.protocol` for subscriber ↔ broker communication.
+Add new dataclasses to `aether.gossip.protocol` for subscriber ↔ broker communication.
 
 - [ ] `SubscribeRequest` - subscriber asks broker to subscribe to a PayloadRange
 - [ ] `SubscribeAck` - broker confirms subscription
@@ -19,7 +19,7 @@ Add new dataclasses to `pubsub.gossip.protocol` for subscriber ↔ broker commun
 
 ## Phase 2: Create `NetworkSubscriber`
 
-Create `pubsub.network.subscriber` - a network wrapper around the existing `Subscriber`.
+Create `aether.network.subscriber` - a network wrapper around the existing `Subscriber`.
 
 - [ ] Create `NetworkSubscriber` class with:
   - [ ] Inner `Subscriber` instance (composition)
@@ -43,7 +43,7 @@ Create `pubsub.network.subscriber` - a network wrapper around the existing `Subs
 
 ## Phase 3: Extend `GossipBroker` for Remote Subscribers
 
-Modify `pubsub.gossip.broker` to track and deliver to remote subscribers.
+Modify `aether.gossip.broker` to track and deliver to remote subscribers.
 
 ### New State to Add
 - [ ] `_remote_subscribers: Dict[NodeAddress, Set[PayloadRange]]` - what each remote subscriber wants
@@ -92,9 +92,9 @@ Modify `pubsub.gossip.broker` to track and deliver to remote subscribers.
 
 | Module | Action |
 |------|--------|
-| `pubsub.gossip.protocol` | Add new message dataclasses |
-| `pubsub.network.subscriber` | Create new file |
-| `pubsub.gossip.broker` | Extend for remote subscriber tracking |
+| `aether.gossip.protocol` | Add new message dataclasses |
+| `aether.network.subscriber` | Create new file |
+| `aether.gossip.broker` | Extend for remote subscriber tracking |
 | `tests/integration/test_network_subscriber.py` | Create new test file |
 
 ---

@@ -1,7 +1,7 @@
 # config.docker.yaml — used exclusively by docker-compose.yml
 #
 # Container hostnames (bootstrap, broker-1, broker-2, broker-3) are
-# resolved by Docker's internal DNS on the pubsub-net bridge network.
+# resolved by Docker's internal DNS on the aether-net bridge network.
 # Publishers and subscribers also run as containers on the same network.
 
 # Bootstrap server
@@ -27,7 +27,7 @@ subscribers:
   base_port: 10000
   count_per_broker: 1
 
-# Publishers (one container running pubsub-publishers)
+# Publishers (one container running aether-publishers)
 publishers:
   local_host: "publishers"
   base_port: 9000

@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pubsub"
+name = "aether"
 version = "0.1.0"
 description = "Distributed publish-subscribe system with gossip protocol and Chandy-Lamport snapshots"
 requires-python = ">=3.13"
@@ -18,15 +18,15 @@ dev = [
 ]
 
 [project.scripts]
-pubsub-admin = "pubsub.cli.admin:main"
-pubsub-distributed = "pubsub.cli.distributed_admin:main"
-pubsub-bootstrap = "pubsub.cli.run_bootstrap:main"
-pubsub-broker = "pubsub.cli.run_broker:main"
-pubsub-publisher = "pubsub.cli.run_publishers:main"
-pubsub-subscriber = "pubsub.cli.run_subscribers:main"
+aether-admin = "aether.cli.admin:main"
+aether-distributed = "aether.cli.distributed_admin:main"
+aether-bootstrap = "aether.cli.run_bootstrap:main"
+aether-broker = "aether.cli.run_broker:main"
+aether-publisher = "aether.cli.run_publishers:main"
+aether-subscriber = "aether.cli.run_subscribers:main"
 
 [tool.setuptools.packages.find]
-include = ["pubsub*"]
+include = ["aether*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

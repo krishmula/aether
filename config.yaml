@@ -51,5 +51,5 @@ snapshot:
 # Logging settings
 logging:
   level: INFO          # DEBUG | INFO | WARNING | ERROR
-  log_file: null       # Optional path, e.g. /var/log/pubsub/broker.log
+  log_file: null       # Optional path, e.g. /var/log/aether/broker.log
   json_console: false  # true for containerised/systemd deployments

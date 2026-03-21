@@ -1,7 +1,7 @@
 import time
 
-from pubsub.gossip.broker import GossipBroker
-from pubsub.network.node import NodeAddress
+from aether.gossip.broker import GossipBroker
+from aether.network.node import NodeAddress
 
 
 def test_marker_propagation():
