@@ -14,8 +14,6 @@
 #   (via _IdentificationMessage) is reachable by those peers.  Passing 0.0.0.0
 #   would cause brokers to advertise an unroutable address to each other.
 
-version: "3.8"
-
 # ── shared config ─────────────────────────────────────────────────────────────
 x-common: &common
   build: .
