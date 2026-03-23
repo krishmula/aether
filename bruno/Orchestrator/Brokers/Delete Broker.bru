@@ -1,0 +1,11 @@
+meta {
+  name: Delete Broker
+  type: http
+  seq: 2
+}
+
+delete {
+  url: {{orchestrator_url}}/api/brokers/{{broker_id}}
+  body: none
+  auth: none
+}

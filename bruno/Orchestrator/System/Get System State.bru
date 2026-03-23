@@ -1,0 +1,11 @@
+meta {
+  name: Get System State
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{orchestrator_url}}/api/state
+  body: none
+  auth: none
+}

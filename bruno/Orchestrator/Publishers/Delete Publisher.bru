@@ -1,0 +1,11 @@
+meta {
+  name: Delete Publisher
+  type: http
+  seq: 2
+}
+
+delete {
+  url: {{orchestrator_url}}/api/publishers/{{publisher_id}}
+  body: none
+  auth: none
+}

@@ -1,0 +1,11 @@
+meta {
+  name: Get Topology
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{orchestrator_url}}/api/state/topology
+  body: none
+  auth: none
+}

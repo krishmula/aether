@@ -1,0 +1,21 @@
+meta {
+  name: Create Broker
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{orchestrator_url}}/api/brokers
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "broker_id": null
+  }
+}

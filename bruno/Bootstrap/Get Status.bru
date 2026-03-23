@@ -1,0 +1,11 @@
+meta {
+  name: Get Status
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{bootstrap_status_url}}/status
+  body: none
+  auth: none
+}

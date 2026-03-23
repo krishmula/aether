@@ -1,0 +1,11 @@
+meta {
+  name: Get Latest Snapshot
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{orchestrator_url}}/api/snapshots/latest
+  body: none
+  auth: none
+}

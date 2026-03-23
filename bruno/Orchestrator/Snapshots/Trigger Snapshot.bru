@@ -1,0 +1,21 @@
+meta {
+  name: Trigger Snapshot
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{orchestrator_url}}/api/snapshots
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "initiator_broker_id": null
+  }
+}

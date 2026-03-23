@@ -51,7 +51,7 @@ async def add_broker(
         info = docker_mgr.create_broker(req)
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    await broadcaster.emit(EventType.BROKER_ADDED, info.model_dump())
+    await broadcaster.emit(EventType.BROKER_ADDED, info.model_dump(mode="json"))
     return ComponentResponse(action="created", component=info)
 
 
@@ -64,7 +64,7 @@ async def remove_broker(broker_id: int) -> ComponentResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    await broadcaster.emit(EventType.BROKER_REMOVED, info.model_dump())
+    await broadcaster.emit(EventType.BROKER_REMOVED, info.model_dump(mode="json"))
     return ComponentResponse(action="removed", component=info)
 
 
@@ -82,7 +82,7 @@ async def add_publisher(
         info = docker_mgr.create_publisher(req)
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    await broadcaster.emit(EventType.PUBLISHER_ADDED, info.model_dump())
+    await broadcaster.emit(EventType.PUBLISHER_ADDED, info.model_dump(mode="json"))
     return ComponentResponse(action="created", component=info)
 
 
@@ -95,7 +95,7 @@ async def remove_publisher(publisher_id: int) -> ComponentResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    await broadcaster.emit(EventType.PUBLISHER_REMOVED, info.model_dump())
+    await broadcaster.emit(EventType.PUBLISHER_REMOVED, info.model_dump(mode="json"))
     return ComponentResponse(action="removed", component=info)
 
 
@@ -111,7 +111,7 @@ async def add_subscriber(req: CreateSubscriberRequest) -> ComponentResponse:
         info = docker_mgr.create_subscriber(req)
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    await broadcaster.emit(EventType.SUBSCRIBER_ADDED, info.model_dump())
+    await broadcaster.emit(EventType.SUBSCRIBER_ADDED, info.model_dump(mode="json"))
     return ComponentResponse(action="created", component=info)
 
 
@@ -124,7 +124,7 @@ async def remove_subscriber(subscriber_id: int) -> ComponentResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    await broadcaster.emit(EventType.SUBSCRIBER_REMOVED, info.model_dump())
+    await broadcaster.emit(EventType.SUBSCRIBER_REMOVED, info.model_dump(mode="json"))
     return ComponentResponse(action="removed", component=info)
 
 
@@ -187,36 +187,40 @@ async def seed_demo() -> dict:
     """Spin up the default demo topology: 3 brokers, 2 publishers, 3 subscribers.
     Idempotent — checks current state and only creates missing components.
     """
-    state = docker_mgr.get_system_state()
-    created: list = []
+    try:
+        state = docker_mgr.get_system_state()
+        created: list = []
 
-    # Brokers: bring total up to 3
-    broker_ids = [b.component_id for b in state.brokers]
-    while len(broker_ids) < 3:
-        info = docker_mgr.create_broker(CreateBrokerRequest())
-        await broadcaster.emit(EventType.BROKER_ADDED, info.model_dump())
-        broker_ids.append(info.component_id)
-        created.append(info)
+        # Brokers: bring total up to 3
+        broker_ids = [b.component_id for b in state.brokers]
+        while len(broker_ids) < 3:
+            info = docker_mgr.create_broker(CreateBrokerRequest())
+            await broadcaster.emit(EventType.BROKER_ADDED, info.model_dump(mode="json"))
+            broker_ids.append(info.component_id)
+            created.append(info)
 
-    # Publishers: bring total up to 2
-    publishers_needed = 2 - len(state.publishers)
-    for _ in range(max(0, publishers_needed)):
-        info = docker_mgr.create_publisher(
-            CreatePublisherRequest(broker_ids=broker_ids)
-        )
-        await broadcaster.emit(EventType.PUBLISHER_ADDED, info.model_dump())
-        created.append(info)
+        # Publishers: bring total up to 2
+        publishers_needed = 2 - len(state.publishers)
+        for _ in range(max(0, publishers_needed)):
+            info = docker_mgr.create_publisher(
+                CreatePublisherRequest(broker_ids=broker_ids)
+            )
+            await broadcaster.emit(EventType.PUBLISHER_ADDED, info.model_dump(mode="json"))
+            created.append(info)
 
-    # Subscribers: one per broker, bring total up to 3
-    subscribers_needed = 3 - len(state.subscribers)
-    for broker_id in broker_ids[: max(0, subscribers_needed)]:
-        info = docker_mgr.create_subscriber(
-            CreateSubscriberRequest(broker_id=broker_id)
-        )
-        await broadcaster.emit(EventType.SUBSCRIBER_ADDED, info.model_dump())
-        created.append(info)
+        # Subscribers: one per broker, bring total up to 3
+        subscribers_needed = 3 - len(state.subscribers)
+        for broker_id in broker_ids[: max(0, subscribers_needed)]:
+            info = docker_mgr.create_subscriber(
+                CreateSubscriberRequest(broker_id=broker_id)
+            )
+            await broadcaster.emit(EventType.SUBSCRIBER_ADDED, info.model_dump(mode="json"))
+            created.append(info)
 
-    return {"seeded": len(created), "components": [c.model_dump() for c in created]}
+    except docker.errors.APIError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"seeded": len(created), "components": [c.model_dump(mode="json") for c in created]}
 
 
 # ---------------------------------------------------------------------------

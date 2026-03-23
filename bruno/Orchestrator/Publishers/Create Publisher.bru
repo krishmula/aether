@@ -1,0 +1,23 @@
+meta {
+  name: Create Publisher
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{orchestrator_url}}/api/publishers
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "publisher_id": null,
+    "broker_ids": null,
+    "interval": 1.0
+  }
+}

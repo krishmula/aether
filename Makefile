@@ -10,20 +10,12 @@ RED = \033[0;31m
 BLUE = \033[0;34m
 NC = \033[0m # No Color
 
-# Component status ports (from docker-compose.yml mapping: host -> container)
-# Container ports are status ports, host ports are mapped differently
-BOOTSTRAP_PORT = 17100
-BROKER_PORTS = 18101 18102 18103
-SUBSCRIBER_PORTS = 20100 20101 20102
-PUBLISHER_PORTS = 19100 19101
-ALL_PORTS = $(BOOTSTRAP_PORT) $(BROKER_PORTS) $(SUBSCRIBER_PORTS) $(PUBLISHER_PORTS)
-
-# Component names for display
-BOOTSTRAP_NAME = bootstrap
-BROKER_NAMES = broker-1 broker-2 broker-3
-SUBSCRIBER_NAMES = subscriber-0 subscriber-1 subscriber-2
-PUBLISHER_NAMES = publisher-0 publisher-1
-ALL_COMPONENTS = $(BOOTSTRAP_NAME) $(BROKER_NAMES) $(SUBSCRIBER_NAMES) $(PUBLISHER_NAMES)
+# Phase 2.6: only bootstrap and orchestrator are compose-managed.
+# All pub-sub components (brokers, publishers, subscribers) are created
+# dynamically by the orchestrator via the Docker SDK.
+BOOTSTRAP_STATUS_PORT = 17100
+ORCHESTRATOR_PORT     = 9000
+ALL_PORTS = $(BOOTSTRAP_STATUS_PORT) $(ORCHESTRATOR_PORT)
 
 # Default target
 all: help
@@ -32,82 +24,40 @@ help:
 	@echo "Aether Distributed Messaging System"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  $(YELLOW)make demo$(NC)     - Build, start, wait 20s, query all status endpoints"
-	@echo "  $(YELLOW)make status$(NC)   - Query /status from every running component"
-	@echo "  $(YELLOW)make logs$(NC)     - Tail all container logs"
-	@echo "  $(YELLOW)make clean$(NC)    - Stop and remove all containers, networks, and volumes"
-	@echo "  $(YELLOW)make build$(NC)    - Build Docker images"
-	@echo "  $(YELLOW)make test$(NC)     - Run unit tests"
-	@echo "  $(YELLOW)make lint$(NC)     - Run lint checks"
-	@echo "  $(YELLOW)make up$(NC)       - Start containers in background"
-	@echo "  $(YELLOW)make down$(NC)     - Stop containers"
-	@echo "  $(YELLOW)make restart$(NC)  - Restart containers"
-	@echo "  $(YELLOW)make ps$(NC)       - Show container status"
+	@echo "  $(YELLOW)make demo$(NC)        - Build, start bootstrap+orchestrator, seed 3+2+3 topology"
+	@echo "  $(YELLOW)make status$(NC)      - Query system state via orchestrator API"
+	@echo "  $(YELLOW)make logs$(NC)        - Tail all container logs"
+	@echo "  $(YELLOW)make clean$(NC)       - Stop and remove all containers (compose + dynamic)"
+	@echo "  $(YELLOW)make build$(NC)       - Build Docker images"
+	@echo "  $(YELLOW)make test$(NC)        - Run unit tests"
+	@echo "  $(YELLOW)make lint$(NC)        - Run lint checks"
+	@echo "  $(YELLOW)make up$(NC)          - Start compose services in background"
+	@echo "  $(YELLOW)make down$(NC)        - Stop compose services"
+	@echo "  $(YELLOW)make restart$(NC)     - Restart compose services"
+	@echo "  $(YELLOW)make ps$(NC)          - Show container status"
 	@echo "  $(YELLOW)make check-ports$(NC) - Check if required ports are available"
 	@echo ""
 	@echo "See docs/instructions.md for detailed usage"
 
 demo: build check-ports
-	@echo "$(YELLOW)Building and starting the full distributed aether system...$(NC)"
-	@echo "$(BLUE)This will start:$(NC)"
-	@echo "  - 1 bootstrap server"
-	@echo "  - 3 brokers"
-	@echo "  - 3 subscribers"
-	@echo "  - 2 publishers"
+	@echo "$(YELLOW)Starting bootstrap + orchestrator...$(NC)"
+	@docker-compose up -d
+	@echo "$(YELLOW)Waiting for orchestrator to be ready$(NC)"
+	@until curl -sf http://localhost:$(ORCHESTRATOR_PORT)/docs >/dev/null 2>&1; do \
+		printf '$(YELLOW).$(NC)'; sleep 2; \
+	done
 	@echo ""
-	@docker-compose up --build -d
-	@echo "$(YELLOW)Waiting 20 seconds for system stabilization...$(NC)"
-	@sleep 20
-	@$(MAKE) status
+	@echo "$(YELLOW)Seeding demo topology (3 brokers, 2 publishers, 3 subscribers)...$(NC)"
+	@curl -sf -X POST http://localhost:$(ORCHESTRATOR_PORT)/api/seed | python3 -m json.tool
+	@echo ""
+	@echo "$(GREEN)Demo ready!$(NC)"
+	@echo "  $(BLUE)API docs:$(NC)      http://localhost:$(ORCHESTRATOR_PORT)/docs"
+	@echo "  $(BLUE)System state:$(NC)  http://localhost:$(ORCHESTRATOR_PORT)/api/state"
+	@echo "  $(BLUE)Live events:$(NC)   ws://localhost:$(ORCHESTRATOR_PORT)/ws/events"
 
 status:
-	@echo "$(YELLOW)Checking status of all 9 components:$(NC)"
-	@echo ""
-	@# Check bootstrap
-	@echo "$(BLUE)Bootstrap:$(NC)"
-	@if curl -s -f http://localhost:$(BOOTSTRAP_PORT)/status >/dev/null 2>&1; then \
-		echo "  $(GREEN)✓$(NC) bootstrap (port $(BOOTSTRAP_PORT)) is online"; \
-	else \
-		echo "  $(RED)✗$(NC) bootstrap (port $(BOOTSTRAP_PORT)) is offline"; \
-	fi
-	@echo ""
-	
-	@# Check brokers
-	@echo "$(BLUE)Brokers:$(NC)"
-	@i=1; for port in $(BROKER_PORTS); do \
-		if curl -s -f http://localhost:$$port/status >/dev/null 2>&1; then \
-			echo "  $(GREEN)✓$(NC) broker-$$i (port $$port) is online"; \
-		else \
-			echo "  $(RED)✗$(NC) broker-$$i (port $$port) is offline"; \
-		fi; \
-		i=$$((i + 1)); \
-	done
-	@echo ""
-	
-	@# Check subscribers
-	@echo "$(BLUE)Subscribers:$(NC)"
-	@i=0; for port in $(SUBSCRIBER_PORTS); do \
-		if curl -s -f http://localhost:$$port/status >/dev/null 2>&1; then \
-			echo "  $(GREEN)✓$(NC) subscriber-$$i (port $$port) is online"; \
-		else \
-			echo "  $(RED)✗$(NC) subscriber-$$i (port $$port) is offline"; \
-		fi; \
-		i=$$((i + 1)); \
-	done
-	@echo ""
-	
-	@# Check publishers
-	@echo "$(BLUE)Publishers:$(NC)"
-	@i=0; for port in $(PUBLISHER_PORTS); do \
-		if curl -s -f http://localhost:$$port/status >/dev/null 2>&1; then \
-			echo "  $(GREEN)✓$(NC) publisher-$$i (port $$port) is online"; \
-		else \
-			echo "  $(RED)✗$(NC) publisher-$$i (port $$port) is offline"; \
-		fi; \
-		i=$$((i + 1)); \
-	done
-	@echo ""
-	@echo "$(YELLOW)Status check complete.$(NC)"
+	@echo "$(YELLOW)System state (via orchestrator):$(NC)"
+	@curl -sf http://localhost:$(ORCHESTRATOR_PORT)/api/state | python3 -m json.tool
 
 logs:
 	@echo "$(YELLOW)Tailing logs from all containers...$(NC)"
@@ -115,7 +65,9 @@ logs:
 	@docker-compose logs -f
 
 clean:
-	@echo "$(YELLOW)Stopping and removing all containers, networks, and volumes...$(NC)"
+	@echo "$(YELLOW)Stopping dynamic aether containers (brokers, publishers, subscribers)...$(NC)"
+	-@docker ps -aq --filter "label=component_type" | xargs -r docker rm -f
+	@echo "$(YELLOW)Stopping compose-managed services (bootstrap + orchestrator)...$(NC)"
 	@docker-compose down -v --remove-orphans
 
 build:
@@ -133,15 +85,15 @@ lint:
 
 # Helper targets
 up:
-	@echo "$(YELLOW)Starting containers in background...$(NC)"
+	@echo "$(YELLOW)Starting compose services in background...$(NC)"
 	@docker-compose up -d
 
 down:
-	@echo "$(YELLOW)Stopping containers...$(NC)"
+	@echo "$(YELLOW)Stopping compose services...$(NC)"
 	@docker-compose down
 
 restart:
-	@echo "$(YELLOW)Restarting containers...$(NC)"
+	@echo "$(YELLOW)Restarting compose services...$(NC)"
 	@docker-compose restart
 
 ps:

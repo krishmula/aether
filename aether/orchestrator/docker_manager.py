@@ -66,13 +66,12 @@ class DockerManager:
             settings.aether_image,
             command=(
                 f"aether-broker --broker-id {broker_id} --host {hostname} "
-                f"--port {internal_port} --status-port {internal_status_port} "
-                f"--bootstrap-host {settings.bootstrap_host} "
-                f"--bootstrap-port {settings.bootstrap_port}"
+                f"--port {internal_port} --status-port {internal_status_port}"
             ),
             name=container_name,
             hostname=hostname,
             network=settings.docker_network,
+            environment={"AETHER_CONFIG": "/app/config.docker.yaml"},
             detach=True,
             ports={
                 f"{internal_port}/tcp": host_port,
@@ -137,6 +136,7 @@ class DockerManager:
             name=container_name,
             hostname=hostname,
             network=settings.docker_network,
+            environment={"AETHER_CONFIG": "/app/config.docker.yaml"},
             detach=True,
             ports={
                 f"{internal_port}/tcp": host_port,
@@ -195,6 +195,10 @@ class DockerManager:
             else ""
         )
 
+        print("req.broker_id", req.broker_id)
+        print("req.broker's range_low", req.range_low)
+        print("req.broker's range_high", req.range_high)
+
         container = self.client.containers.run(
             settings.aether_image,
             command=(
@@ -206,6 +210,7 @@ class DockerManager:
             name=container_name,
             hostname=hostname,
             network=settings.docker_network,
+            environment={"AETHER_CONFIG": "/app/config.docker.yaml"},
             detach=True,
             ports={
                 f"{internal_port}/tcp": host_port,

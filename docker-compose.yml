@@ -1,35 +1,21 @@
-# docker-compose.yml — Phase 1: one container per process
+# docker-compose.yml — Phase 2.6: bootstrap + orchestrator only
 #
-# Spin up the full system:
-#   docker-compose up --build
+# The orchestrator manages all pub-sub components (brokers, publishers, subscribers)
+# dynamically via the Docker SDK. Static infrastructure only here.
 #
-# Or via the Makefile:
-#   make demo     # start in background, wait, print status
-#   make clean    # tear down everything
+# Start the full system:
+#   make demo     # start, wait for orchestrator, seed 3+2+3 topology
+#   make clean    # tear down everything (compose + dynamic containers)
 #
 # Networking note:
-#   Each broker is started with --host <container-name> rather than 0.0.0.0.
-#   This is intentional: NodeAddress resolves the hostname to the container's
-#   bridge IP via Docker DNS, so the address the broker advertises to peers
-#   (via _IdentificationMessage) is reachable by those peers.  Passing 0.0.0.0
-#   would cause brokers to advertise an unroutable address to each other.
+#   All containers join aether-net. The orchestrator creates dynamic containers
+#   on this same network so they can resolve each other by hostname.
 
-# ── shared config ─────────────────────────────────────────────────────────────
-x-common: &common
-  build: .
-  environment:
-    - AETHER_CONFIG=/app/config.docker.yaml
-  volumes:
-    - ./config.docker.yaml:/app/config.docker.yaml:ro
-  networks:
-    - aether-net
-  restart: "no"
-
-# ── services ──────────────────────────────────────────────────────────────────
 services:
-  # ── bootstrap ───────────────────────────────────────────────────────────────
+  # ── bootstrap ─────────────────────────────────────────────────────────────
   bootstrap:
-    <<: *common
+    build: .
+    image: aether:latest
     container_name: aether-bootstrap
     hostname: bootstrap
     command: >
@@ -38,199 +24,53 @@ services:
         --port 7000
         --status-port 17000
         --log-level INFO
+    environment:
+      - AETHER_CONFIG=/app/config.docker.yaml
+    volumes:
+      - ./config.docker.yaml:/app/config.docker.yaml:ro
     ports:
-      - "7100:7000" # TCP peer-discovery (host 7100 → container 7000)
-      - "17100:17000" # HTTP /status (host 17100 → container 17000)
+      - "7100:7000"   # TCP peer-discovery (host 7100 → container 7000)
+      - "17100:17000" # HTTP /status     (host 17100 → container 17000)
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:17000/status"]
       interval: 5s
       timeout: 3s
       retries: 5
       start_period: 5s
+    networks:
+      - aether-net
+    restart: "no"
 
-  # ── broker-1 ────────────────────────────────────────────────────────────────
-  broker-1:
-    <<: *common
-    container_name: aether-broker-1
-    hostname: broker-1
-    command: >
-      aether-broker
-        --broker-id 1
-        --host broker-1
-        --port 8000
-        --status-port 18000
-        --log-level INFO
+  # ── orchestrator ──────────────────────────────────────────────────────────
+  orchestrator:
+    image: aether:latest
+    container_name: aether-orchestrator
+    hostname: orchestrator
+    command: uvicorn aether.orchestrator.main:app --host 0.0.0.0 --port 9000
     ports:
-      - "8101:8000" # TCP (host 8101 → container 8000)
-      - "18101:18000" # HTTP /status (host 18101 → container 18000)
+      - "9000:9000"   # FastAPI control plane
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker-out-of-Docker
+    user: root  # required to access the Docker socket
+    environment:
+      BOOTSTRAP_HOST: bootstrap
+      BOOTSTRAP_PORT: "7000"
+      AETHER_IMAGE: aether:latest
+      DOCKER_NETWORK: aether-net
     depends_on:
       bootstrap:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:18000/status"]
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/docs"]
       interval: 5s
       timeout: 3s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 15s
+    networks:
+      - aether-net
+    restart: "no"
 
-  # ── broker-2 ────────────────────────────────────────────────────────────────
-  broker-2:
-    <<: *common
-    container_name: aether-broker-2
-    hostname: broker-2
-    command: >
-      aether-broker
-        --broker-id 2
-        --host broker-2
-        --port 8000
-        --status-port 18000
-        --log-level INFO
-    ports:
-      - "8102:8000" # TCP (host 8102 → container 8000)
-      - "18102:18000" # HTTP /status (host 18102 → container 18000)
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:18000/status"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-
-  # ── broker-3 ────────────────────────────────────────────────────────────────
-  broker-3:
-    <<: *common
-    container_name: aether-broker-3
-    hostname: broker-3
-    command: >
-      aether-broker
-        --broker-id 3
-        --host broker-3
-        --port 8000
-        --status-port 18000
-        --log-level INFO
-    ports:
-      - "8103:8000" # TCP (host 8103 → container 8000)
-      - "18103:18000" # HTTP /status (host 18103 → container 18000)
-    depends_on:
-      bootstrap:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:18000/status"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-
-  # ── subscriber-0 (subscriber_id=0 → broker-1) ──────────────────────────────
-  subscriber-0:
-    <<: *common
-    container_name: aether-subscriber-0
-    hostname: subscriber-0
-    command: >
-      aether-subscriber
-        --subscriber-id 0
-        --host subscriber-0
-        --log-level INFO
-    ports:
-      - "10100:10000" # TCP (host 10100 → container 10000)
-      - "20100:20000" # HTTP /status (host 20100 → container 20000)
-    depends_on:
-      broker-1:
-        condition: service_healthy
-      broker-2:
-        condition: service_healthy
-      broker-3:
-        condition: service_healthy
-
-  # ── subscriber-1 (subscriber_id=1 → broker-2) ──────────────────────────────
-  subscriber-1:
-    <<: *common
-    container_name: aether-subscriber-1
-    hostname: subscriber-1
-    command: >
-      aether-subscriber
-        --subscriber-id 1
-        --host subscriber-1
-        --log-level INFO
-    ports:
-      - "10101:10001" # TCP (host 10101 → container 10001)
-      - "20101:20001" # HTTP /status (host 20101 → container 20001)
-    depends_on:
-      broker-1:
-        condition: service_healthy
-      broker-2:
-        condition: service_healthy
-      broker-3:
-        condition: service_healthy
-
-  # ── subscriber-2 (subscriber_id=2 → broker-3) ──────────────────────────────
-  subscriber-2:
-    <<: *common
-    container_name: aether-subscriber-2
-    hostname: subscriber-2
-    command: >
-      aether-subscriber
-        --subscriber-id 2
-        --host subscriber-2
-        --log-level INFO
-    ports:
-      - "10102:10002" # TCP (host 10102 → container 10002)
-      - "20102:20002" # HTTP /status (host 20102 → container 20002)
-    depends_on:
-      broker-1:
-        condition: service_healthy
-      broker-2:
-        condition: service_healthy
-      broker-3:
-        condition: service_healthy
-
-  # ── publisher-0 ─────────────────────────────────────────────────────────────
-  publisher-0:
-    <<: *common
-    container_name: aether-publisher-0
-    hostname: publisher-0
-    command: >
-      aether-publisher
-        --publisher-id 0
-        --host publisher-0
-        --interval 1.0
-        --log-level INFO
-    ports:
-      - "9100:9000" # TCP (host 9100 → container 9000)
-      - "19100:19000" # HTTP /status (host 19100 → container 19000)
-    depends_on:
-      broker-1:
-        condition: service_healthy
-      broker-2:
-        condition: service_healthy
-      broker-3:
-        condition: service_healthy
-
-  # ── publisher-1 ─────────────────────────────────────────────────────────────
-  publisher-1:
-    <<: *common
-    container_name: aether-publisher-1
-    hostname: publisher-1
-    command: >
-      aether-publisher
-        --publisher-id 1
-        --host publisher-1
-        --interval 1.0
-        --log-level INFO
-    ports:
-      - "9101:9001" # TCP (host 9101 → container 9001)
-      - "19101:19001" # HTTP /status (host 19101 → container 19001)
-    depends_on:
-      broker-1:
-        condition: service_healthy
-      broker-2:
-        condition: service_healthy
-      broker-3:
-        condition: service_healthy
-
-# ── network ───────────────────────────────────────────────────────────────────
+# ── network ───────────────────────────────────────────────────────────────
 networks:
   aether-net:
     driver: bridge

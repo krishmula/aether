@@ -370,8 +370,8 @@ class CreatePublisherRequest(BaseModel):
 class CreateSubscriberRequest(BaseModel):
     subscriber_id: int | None = None
     broker_id: int                     # required — subscriber connects to exactly one broker
-    range_low: int | None = Field(default=None, ge=0, le=255)
-    range_high: int | None = Field(default=None, ge=0, le=255)
+    range_low: int = Field(ge=0, le=255)   # required — caller owns range assignment
+    range_high: int = Field(ge=0, le=255)  # required — caller owns range assignment
 
 class TriggerSnapshotRequest(BaseModel):
     initiator_broker_id: int | None = None  # None = pick first running broker
@@ -579,9 +579,7 @@ class DockerManager:
         broker_hostname = self._broker_hostname(req.broker_id)
         broker_port = 8000 + req.broker_id * 10
 
-        range_args = ""
-        if req.range_low is not None and req.range_high is not None:
-            range_args = f"--range-low {req.range_low} --range-high {req.range_high}"
+        range_args = f"--range-low {req.range_low} --range-high {req.range_high}"
 
         container = self.client.containers.run(
             image=IMAGE_NAME,
@@ -970,13 +968,15 @@ Neither publishers nor subscribers talk to the bootstrap server — only brokers
 
 **Future improvement:** Add a mechanism for publishers/subscribers to receive live broker list updates (e.g., via a control channel from the orchestrator, or by having them query bootstrap periodically).
 
-#### Payload range partitioning is static at creation time
+#### Payload range assignment is the caller's responsibility
 
-Subscribers receive their payload range via `--range-low` / `--range-high` CLI args. The orchestrator computes ranges using `partition_payload_space(total_subscribers)` at creation time. These ranges are fixed for the lifetime of the subscriber.
+`range_low` and `range_high` are required fields in `CreateSubscriberRequest`. The orchestrator always passes them explicitly to the container via `--range-low` / `--range-high` CLI args — it never auto-computes ranges internally. This keeps `ComponentInfo` fully populated and the orchestrator's state accurate.
 
-**Consequence:** When subscribers are added or removed, existing subscribers keep their original ranges. This can lead to overlapping coverage or gaps in the payload space.
+The auto-partition fallback (`partition_payload_space`) remains in `run_subscribers.py` for standalone CLI use only (running subscribers without the orchestrator, e.g., for development or testing).
 
-**Future improvement:** When adding/removing subscribers, the orchestrator should tear down all subscribers on the affected broker, repartition the payload space, and recreate them with updated ranges. This ensures clean, non-overlapping coverage at all times.
+**Why not auto-compute in the orchestrator?** `partition_payload_space(total_subscribers)` breaks in a dynamic system — `total_subscribers` is a moving target, so adding subscribers one at a time produces overlapping or gapped coverage. Range assignment is a cluster-level concern that belongs to the API consumer.
+
+**Future improvement:** A rebalancing endpoint that, when a subscriber is added or removed, tears down all subscribers on the affected broker, computes new non-overlapping ranges via `partition_payload_space`, and recreates them with explicit ranges. This logic lives above the orchestrator API layer.
 
 ---
 
