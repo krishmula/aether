@@ -263,126 +263,477 @@ The CLI scripts for brokers, publishers, and subscribers previously required the
 
 All changes are backwards-compatible — existing `docker-compose.yml` commands don't pass the new args and continue using the config-based paths.
 
-### 2.1 — Project Structure
+### 2.1 — Project Structure ✅
+
+The orchestrator lives inside the `aether` package alongside the existing pub-sub code:
 
 ```
-aether-system/
-├── core/                    # Your existing pub-sub code
-│   ├── broker.py
-│   ├── publisher.py
-│   ├── subscriber.py
-│   ├── bootstrap_server.py
-│   └── snapshot.py
-├── orchestrator/            # New: Control plane
-│   ├── main.py              # FastAPI app
-│   ├── docker_manager.py    # Docker SDK wrapper
-│   ├── state.py             # System state tracking
-│   └── events.py            # WebSocket event broadcasting
-├── dashboard/               # New: Frontend (Phase 3)
+aether/
+├── aether/
+│   ├── gossip/              # Existing: GossipBroker with gossip protocol, snapshots
+│   ├── network/             # Existing: NetworkPublisher, NetworkSubscriber, NetworkNode
+│   ├── cli/                 # Existing: CLI entry points (run_broker, run_publisher, etc.)
+│   ├── config/              # Existing: Config loading and validation
+│   └── orchestrator/        # New: Control plane
+│       ├── __init__.py
+│       ├── models.py         # Pydantic models for API + WebSocket events ✅
+│       ├── docker_manager.py # Docker SDK wrapper (manages containers)
+│       ├── main.py           # FastAPI application
+│       └── events.py         # WebSocket event broadcaster
+├── dashboard/                # Phase 3: React frontend
 ├── docker-compose.yml
 ├── Dockerfile
 ├── Makefile
 └── README.md
 ```
 
-### 2.2 — Docker Manager
+### 2.2 — Data Models ✅
 
-This is the core of the orchestration layer. It uses the Docker SDK for Python to manage containers:
+**Status: Completed** — `aether/orchestrator/models.py`
+
+All API request/response types and internal state are defined as Pydantic models. This makes FastAPI auto-generate accurate Swagger docs and enforces type safety at the boundary between the orchestrator and the dashboard.
+
+#### Enums
 
 ```python
-# orchestrator/docker_manager.py
+class ComponentType(StrEnum):
+    BOOTSTRAP = "bootstrap"
+    BROKER = "broker"
+    PUBLISHER = "publisher"
+    SUBSCRIBER = "subscriber"
+
+class ComponentStatus(StrEnum):
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    ERROR = "error"
+
+class EventType(StrEnum):
+    # Orchestration events (from control plane)
+    BROKER_ADDED = "broker_added"
+    BROKER_REMOVED = "broker_removed"
+    PUBLISHER_ADDED = "publisher_added"
+    PUBLISHER_REMOVED = "publisher_removed"
+    SUBSCRIBER_ADDED = "subscriber_added"
+    SUBSCRIBER_REMOVED = "subscriber_removed"
+    COMPONENT_STATUS_CHANGED = "component_status_changed"
+
+    # System events (from log tailing)
+    MESSAGE_PUBLISHED = "message_published"
+    MESSAGE_DELIVERED = "message_delivered"
+    SNAPSHOT_INITIATED = "snapshot_initiated"
+    SNAPSHOT_COMPLETE = "snapshot_complete"
+    PEER_JOINED = "peer_joined"
+    PEER_EVICTED = "peer_evicted"
+```
+
+#### Component State Tracking
+
+`ComponentInfo` is the central record the orchestrator maintains per managed container. It covers all four component types using optional fields for type-specific data:
+
+```python
+class ComponentInfo(BaseModel):
+    component_type: ComponentType
+    component_id: int
+    container_name: str        # e.g. "aether-broker-4"
+    container_id: str | None   # Docker hex ID, None before container.run() returns
+    hostname: str              # Docker DNS name on aether-net, e.g. "broker-4"
+    internal_port: int         # TCP port inside the container
+    internal_status_port: int  # HTTP status port (internal_port + 10000)
+    host_port: int | None      # mapped to host for external access
+    host_status_port: int | None
+    status: ComponentStatus = ComponentStatus.STARTING
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Publisher-specific
+    broker_ids: list[int] = Field(default_factory=list)
+    publish_interval: float = 1.0
+
+    # Subscriber-specific
+    broker_id: int | None = None   # single parent broker
+    range_low: int | None = None   # payload range [0-255]
+    range_high: int | None = None
+```
+
+#### API Request Models
+
+```python
+class CreateBrokerRequest(BaseModel):
+    broker_id: int | None = None       # auto-assigned if omitted
+
+class CreatePublisherRequest(BaseModel):
+    publisher_id: int | None = None
+    broker_ids: list[int] | None = None  # None = all running brokers
+    interval: float = Field(default=1.0, gt=0)
+
+class CreateSubscriberRequest(BaseModel):
+    subscriber_id: int | None = None
+    broker_id: int                     # required — subscriber connects to exactly one broker
+    range_low: int | None = Field(default=None, ge=0, le=255)
+    range_high: int | None = Field(default=None, ge=0, le=255)
+
+class TriggerSnapshotRequest(BaseModel):
+    initiator_broker_id: int | None = None  # None = pick first running broker
+```
+
+#### API Response Models
+
+```python
+class SystemState(BaseModel):
+    brokers: list[ComponentInfo]
+    publishers: list[ComponentInfo]
+    subscribers: list[ComponentInfo]
+    bootstrap: BootstrapInfo | None
+
+class TopologyResponse(BaseModel):
+    nodes: list[TopologyNode]   # id, type, status per component
+    edges: list[TopologyEdge]   # source, target, edge_type ("peer"/"publish"/"subscribe")
+
+class MetricsResponse(BaseModel):
+    brokers: list[BrokerMetrics]    # per-broker: peer_count, messages_processed, etc.
+    total_messages_processed: int
+    total_brokers: int
+    total_publishers: int
+    total_subscribers: int
+
+class SnapshotStatusResponse(BaseModel):
+    snapshot_id: str | None
+    initiator_broker_id: int | None
+    timestamp: float | None
+    broker_states: list[dict]
+    status: str   # "none" | "in_progress" | "complete"
+```
+
+#### WebSocket Event
+
+Every event pushed over `/ws/events` is a `WebSocketEvent`:
+
+```python
+class WebSocketEvent(BaseModel):
+    event_type: EventType
+    timestamp: float        # time.time()
+    data: dict              # ComponentInfo.model_dump() or event-specific payload
+```
+
+### 2.3 — Docker Manager ✅
+
+**Status: Completed** — `aether/orchestrator/docker_manager.py`
+
+`aether/orchestrator/docker_manager.py` — the core of the orchestration layer. Uses the Docker SDK for Python to manage containers, with `ComponentInfo` as the internal state record.
+
+**Port allocation strategy:**
+- Brokers: internal port `8000 + broker_id * 10`, status port `18000 + broker_id * 10`
+- Publishers: internal port `9000 + publisher_id * 10`, status port `19000 + publisher_id * 10`
+- Subscribers: internal port `9100 + subscriber_id * 10`, status port `19100 + subscriber_id * 10`
+- Host ports mirror internal ports for external access.
+
+**ID auto-assignment:** If `broker_id` / `publisher_id` / `subscriber_id` is omitted from the request, the manager assigns the next unused integer starting at 1. The orchestrator is the sole authority for all pub-sub containers — there are no docker-compose-managed brokers/publishers/subscribers to collide with.
+
+```python
+# aether/orchestrator/docker_manager.py
 import docker
-import uuid
+from .models import (
+    ComponentInfo, ComponentType, ComponentStatus,
+    CreateBrokerRequest, CreatePublisherRequest, CreateSubscriberRequest,
+    SystemState, TopologyResponse, TopologyNode, TopologyEdge,
+    MetricsResponse, BrokerMetrics, SnapshotStatusResponse, BootstrapInfo,
+)
+
+BOOTSTRAP_HOST = "bootstrap"
+BOOTSTRAP_PORT = 7000
+IMAGE_NAME = "aether-core"
+NETWORK_NAME = "aether-net"
 
 class DockerManager:
     def __init__(self):
-        # Mount the Docker socket so the orchestrator can control Docker
         self.client = docker.from_env()
-        self.network_name = "aether-net"
-        self.containers = {}  # id -> container info
+        self._components: dict[str, ComponentInfo] = {}  # container_name -> ComponentInfo
         self._ensure_network()
 
     def _ensure_network(self):
-        """Create the Docker network if it doesn't exist."""
         try:
-            self.client.networks.get(self.network_name)
+            self.client.networks.get(NETWORK_NAME)
         except docker.errors.NotFound:
-            self.client.networks.create(self.network_name, driver="bridge")
+            self.client.networks.create(NETWORK_NAME, driver="bridge")
 
-    def create_broker(self, broker_id: str = None) -> dict:
-        """Spin up a new broker container."""
-        broker_id = broker_id or f"broker-{uuid.uuid4().hex[:6]}"
-        port = self._next_available_port("broker")
+    # --- Broker Lifecycle ---
+
+    def create_broker(self, req: CreateBrokerRequest) -> ComponentInfo:
+        broker_id = req.broker_id or self._next_id(ComponentType.BROKER, start=1)
+        hostname = f"broker-{broker_id}"
+        internal_port = 8000 + broker_id * 10
+        status_port = internal_port + 10000
+        container_name = f"aether-broker-{broker_id}"
 
         container = self.client.containers.run(
-            image="aether-core",
-            command=f"python broker.py --id {broker_id} --host 0.0.0.0 --port {port} --bootstrap bootstrap:4000",
-            name=broker_id,
-            network=self.network_name,
+            image=IMAGE_NAME,
+            command=(
+                f"aether-broker --broker-id {broker_id} --host {hostname} "
+                f"--port {internal_port} --status-port {status_port} "
+                f"--bootstrap-host {BOOTSTRAP_HOST} --bootstrap-port {BOOTSTRAP_PORT}"
+            ),
+            name=container_name,
+            hostname=hostname,
+            network=NETWORK_NAME,
             detach=True,
-            ports={f"{port}/tcp": port, f"{port + 3000}/tcp": port + 3000},
-            labels={"aether.role": "broker", "aether.id": broker_id}
+            ports={
+                f"{internal_port}/tcp": internal_port,
+                f"{status_port}/tcp": status_port,
+            },
+            labels={"aether.role": "broker", "aether.id": str(broker_id)},
         )
 
-        self.containers[broker_id] = {
-            "id": broker_id,
-            "type": "broker",
-            "container_id": container.id,
-            "port": port,
-            "status_port": port + 3000,
-            "status": "running"
-        }
-        return self.containers[broker_id]
-
-    def remove_broker(self, broker_id: str) -> dict:
-        """Gracefully stop and remove a broker container."""
-        if broker_id not in self.containers:
-            raise ValueError(f"Unknown broker: {broker_id}")
-
-        container = self.client.containers.get(self.containers[broker_id]["container_id"])
-        container.stop(timeout=10)
-        container.remove()
-        info = self.containers.pop(broker_id)
-        info["status"] = "removed"
+        info = ComponentInfo(
+            component_type=ComponentType.BROKER,
+            component_id=broker_id,
+            container_name=container_name,
+            container_id=container.id,
+            hostname=hostname,
+            internal_port=internal_port,
+            internal_status_port=status_port,
+            host_port=internal_port,
+            host_status_port=status_port,
+        )
+        self._components[container_name] = info
         return info
 
-    def create_publisher(self, publisher_id: str = None, topics: list = None, rate: int = 10) -> dict:
-        """Spin up a new publisher container."""
-        # Similar to create_broker, but runs publisher.py
+    def remove_broker(self, broker_id: int) -> ComponentInfo:
+        info = self._get_component(ComponentType.BROKER, broker_id)
+        info.status = ComponentStatus.STOPPING
+        container = self.client.containers.get(info.container_id)
+        container.stop(timeout=10)
+        container.remove()
+        info.status = ComponentStatus.STOPPED
+        del self._components[info.container_name]
+        return info
+
+    # --- Publisher Lifecycle ---
+
+    def create_publisher(self, req: CreatePublisherRequest) -> ComponentInfo:
+        publisher_id = req.publisher_id or self._next_id(ComponentType.PUBLISHER)
+        hostname = f"publisher-{publisher_id}"
+        internal_port = 9000 + publisher_id * 10
+        status_port = internal_port + 10000
+        container_name = f"aether-publisher-{publisher_id}"
+
+        # Resolve which brokers to publish to
+        broker_ids = req.broker_ids or self._running_broker_ids()
+        broker_hosts = " ".join(
+            f"--broker-host {self._broker_hostname(bid)}"
+            for bid in broker_ids
+        )
+        broker_port = 8000  # all brokers use the same internal port scheme
+
+        container = self.client.containers.run(
+            image=IMAGE_NAME,
+            command=(
+                f"aether-publisher --publisher-id {publisher_id} --host {hostname} "
+                f"--port {internal_port} --status-port {status_port} "
+                f"{broker_hosts} --broker-port {broker_port} "
+                f"--interval {req.interval}"
+            ),
+            name=container_name,
+            hostname=hostname,
+            network=NETWORK_NAME,
+            detach=True,
+            ports={f"{internal_port}/tcp": internal_port, f"{status_port}/tcp": status_port},
+            labels={"aether.role": "publisher", "aether.id": str(publisher_id)},
+        )
+
+        info = ComponentInfo(
+            component_type=ComponentType.PUBLISHER,
+            component_id=publisher_id,
+            container_name=container_name,
+            container_id=container.id,
+            hostname=hostname,
+            internal_port=internal_port,
+            internal_status_port=status_port,
+            host_port=internal_port,
+            host_status_port=status_port,
+            broker_ids=broker_ids,
+            publish_interval=req.interval,
+        )
+        self._components[container_name] = info
+        return info
+
+    def remove_publisher(self, publisher_id: int) -> ComponentInfo:
+        info = self._get_component(ComponentType.PUBLISHER, publisher_id)
+        info.status = ComponentStatus.STOPPING
+        container = self.client.containers.get(info.container_id)
+        container.stop(timeout=10)
+        container.remove()
+        info.status = ComponentStatus.STOPPED
+        del self._components[info.container_name]
+        return info
+
+    # --- Subscriber Lifecycle ---
+
+    def create_subscriber(self, req: CreateSubscriberRequest) -> ComponentInfo:
+        subscriber_id = req.subscriber_id or self._next_id(ComponentType.SUBSCRIBER)
+        hostname = f"subscriber-{subscriber_id}"
+        internal_port = 9100 + subscriber_id * 10
+        status_port = internal_port + 10000
+        container_name = f"aether-subscriber-{subscriber_id}"
+
+        broker_hostname = self._broker_hostname(req.broker_id)
+        broker_port = 8000 + req.broker_id * 10
+
+        range_args = ""
+        if req.range_low is not None and req.range_high is not None:
+            range_args = f"--range-low {req.range_low} --range-high {req.range_high}"
+
+        container = self.client.containers.run(
+            image=IMAGE_NAME,
+            command=(
+                f"aether-subscriber --subscriber-id {subscriber_id} --host {hostname} "
+                f"--port {internal_port} --status-port {status_port} "
+                f"--broker-host {broker_hostname} --broker-port {broker_port} "
+                f"{range_args}"
+            ),
+            name=container_name,
+            hostname=hostname,
+            network=NETWORK_NAME,
+            detach=True,
+            ports={f"{internal_port}/tcp": internal_port, f"{status_port}/tcp": status_port},
+            labels={"aether.role": "subscriber", "aether.id": str(subscriber_id)},
+        )
+
+        info = ComponentInfo(
+            component_type=ComponentType.SUBSCRIBER,
+            component_id=subscriber_id,
+            container_name=container_name,
+            container_id=container.id,
+            hostname=hostname,
+            internal_port=internal_port,
+            internal_status_port=status_port,
+            host_port=internal_port,
+            host_status_port=status_port,
+            broker_id=req.broker_id,
+            range_low=req.range_low,
+            range_high=req.range_high,
+        )
+        self._components[container_name] = info
+        return info
+
+    def remove_subscriber(self, subscriber_id: int) -> ComponentInfo:
+        info = self._get_component(ComponentType.SUBSCRIBER, subscriber_id)
+        info.status = ComponentStatus.STOPPING
+        container = self.client.containers.get(info.container_id)
+        container.stop(timeout=10)
+        container.remove()
+        info.status = ComponentStatus.STOPPED
+        del self._components[info.container_name]
+        return info
+
+    # --- System State ---
+
+    def get_system_state(self) -> SystemState:
+        brokers = [c for c in self._components.values() if c.component_type == ComponentType.BROKER]
+        publishers = [c for c in self._components.values() if c.component_type == ComponentType.PUBLISHER]
+        subscribers = [c for c in self._components.values() if c.component_type == ComponentType.SUBSCRIBER]
+        return SystemState(brokers=brokers, publishers=publishers, subscribers=subscribers)
+
+    def get_topology(self) -> TopologyResponse:
+        """Build a node/edge graph by querying each broker's /status endpoint for peer lists."""
+        nodes = []
+        edges = []
+        for info in self._components.values():
+            nodes.append(TopologyNode(
+                id=info.hostname,
+                component_type=info.component_type,
+                component_id=info.component_id,
+                status=info.status,
+            ))
+        # Broker-broker edges: query each broker's /status for its peer list
+        for broker in (c for c in self._components.values() if c.component_type == ComponentType.BROKER):
+            status = self._fetch_status(broker.host_status_port)
+            for peer in status.get("peers", []):
+                edge_id = tuple(sorted([broker.hostname, peer]))
+                if edge_id not in seen_edges:
+                    edges.append(TopologyEdge(source=broker.hostname, target=peer, edge_type="peer"))
+                    seen_edges.add(edge_id)
+        # Publisher→broker edges from ComponentInfo.broker_ids
+        for pub in (c for c in self._components.values() if c.component_type == ComponentType.PUBLISHER):
+            for bid in pub.broker_ids:
+                edges.append(TopologyEdge(source=pub.hostname, target=f"broker-{bid}", edge_type="publish"))
+        # Subscriber→broker edges from ComponentInfo.broker_id
+        for sub in (c for c in self._components.values() if c.component_type == ComponentType.SUBSCRIBER):
+            if sub.broker_id is not None:
+                edges.append(TopologyEdge(source=sub.hostname, target=f"broker-{sub.broker_id}", edge_type="subscribe"))
+        return TopologyResponse(nodes=nodes, edges=edges)
+
+    def get_metrics(self) -> MetricsResponse:
+        """Aggregate metrics by polling each broker's /status endpoint."""
+        broker_metrics = []
+        total_messages = 0
+        for broker in (c for c in self._components.values() if c.component_type == ComponentType.BROKER):
+            status = self._fetch_status(broker.host_status_port)
+            m = BrokerMetrics(
+                broker_id=broker.component_id,
+                host=broker.hostname,
+                port=broker.internal_port,
+                peer_count=len(status.get("peers", [])),
+                subscriber_count=len(status.get("subscribers", [])),
+                messages_processed=status.get("messages_processed", 0),
+                uptime_seconds=status.get("uptime_seconds", 0.0),
+                snapshot_state=status.get("snapshot_state", "idle"),
+            )
+            broker_metrics.append(m)
+            total_messages += m.messages_processed
+        state = self.get_system_state()
+        return MetricsResponse(
+            brokers=broker_metrics,
+            total_messages_processed=total_messages,
+            total_brokers=len(state.brokers),
+            total_publishers=len(state.publishers),
+            total_subscribers=len(state.subscribers),
+        )
+
+    def trigger_snapshot(self, initiator_broker_id: int | None) -> SnapshotStatusResponse:
+        """Trigger Chandy-Lamport snapshot by POSTing to the initiating broker's /snapshot endpoint."""
         ...
 
-    def create_subscriber(self, subscriber_id: str = None, topics: list = None) -> dict:
-        """Spin up a new subscriber container."""
-        ...
+    # --- Helpers ---
 
-    def get_system_state(self) -> dict:
-        """Return current state of all running components."""
-        state = {"brokers": [], "publishers": [], "subscribers": []}
-        for cid, info in self.containers.items():
-            state[f"{info['type']}s"].append(info)
-        return state
+    def _next_id(self, component_type: ComponentType, start: int = 0) -> int:
+        existing = {c.component_id for c in self._components.values() if c.component_type == component_type}
+        n = start
+        while n in existing:
+            n += 1
+        return n
 
-    def trigger_snapshot(self, initiator_broker_id: str) -> dict:
-        """Trigger Chandy-Lamport snapshot on a specific broker."""
-        # Send HTTP request to the broker's status endpoint
-        # or exec into the container to trigger snapshot
-        ...
+    def _get_component(self, component_type: ComponentType, component_id: int) -> ComponentInfo:
+        for info in self._components.values():
+            if info.component_type == component_type and info.component_id == component_id:
+                return info
+        raise ValueError(f"{component_type} {component_id} not found")
 
-    def _next_available_port(self, component_type: str) -> int:
-        """Find next available port for a component type."""
+    def _running_broker_ids(self) -> list[int]:
+        return [c.component_id for c in self._components.values() if c.component_type == ComponentType.BROKER]
+
+    def _broker_hostname(self, broker_id: int) -> str:
+        return f"broker-{broker_id}"
+
+    def _fetch_status(self, status_port: int) -> dict:
+        """Hit localhost:<status_port>/status, return parsed JSON."""
         ...
 ```
 
-### 2.3 — FastAPI Endpoints
+### 2.4 — FastAPI Endpoints
 
 ```python
-# orchestrator/main.py
+# aether/orchestrator/main.py
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from docker_manager import DockerManager
-from events import EventBroadcaster
+from .docker_manager import DockerManager
+from .events import EventBroadcaster
+from .models import (
+    CreateBrokerRequest, CreatePublisherRequest, CreateSubscriberRequest,
+    TriggerSnapshotRequest, ComponentResponse,
+)
 
-app = FastAPI(title="Pub-Sub Control Plane")
+app = FastAPI(title="Aether Control Plane")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 docker_mgr = DockerManager()
@@ -390,99 +741,120 @@ broadcaster = EventBroadcaster()
 
 # --- Component Lifecycle ---
 
-@app.post("/api/brokers")
-async def add_broker():
-    """Spin up a new broker."""
-    broker = docker_mgr.create_broker()
-    await broadcaster.emit("broker_added", broker)
-    return broker
+@app.post("/api/brokers", response_model=ComponentResponse)
+async def add_broker(req: CreateBrokerRequest = CreateBrokerRequest()):
+    """Spin up a new broker container."""
+    info = docker_mgr.create_broker(req)
+    await broadcaster.emit(EventType.BROKER_ADDED, info.model_dump())
+    return ComponentResponse(action="created", component=info)
 
-@app.delete("/api/brokers/{broker_id}")
-async def remove_broker(broker_id: str):
-    """Remove a broker."""
-    result = docker_mgr.remove_broker(broker_id)
-    await broadcaster.emit("broker_removed", result)
-    return result
+@app.delete("/api/brokers/{broker_id}", response_model=ComponentResponse)
+async def remove_broker(broker_id: int):
+    """Stop and remove a broker container."""
+    info = docker_mgr.remove_broker(broker_id)
+    await broadcaster.emit(EventType.BROKER_REMOVED, info.model_dump())
+    return ComponentResponse(action="removed", component=info)
 
-@app.post("/api/publishers")
-async def add_publisher(topics: list[str] = ["default"], rate: int = 10):
-    """Spin up a new publisher."""
-    publisher = docker_mgr.create_publisher(topics=topics, rate=rate)
-    await broadcaster.emit("publisher_added", publisher)
-    return publisher
+@app.post("/api/publishers", response_model=ComponentResponse)
+async def add_publisher(req: CreatePublisherRequest = CreatePublisherRequest()):
+    """Spin up a new publisher container."""
+    info = docker_mgr.create_publisher(req)
+    await broadcaster.emit(EventType.PUBLISHER_ADDED, info.model_dump())
+    return ComponentResponse(action="created", component=info)
 
-@app.delete("/api/publishers/{publisher_id}")
-async def remove_publisher(publisher_id: str):
-    result = docker_mgr.remove_publisher(publisher_id)
-    await broadcaster.emit("publisher_removed", result)
-    return result
+@app.delete("/api/publishers/{publisher_id}", response_model=ComponentResponse)
+async def remove_publisher(publisher_id: int):
+    info = docker_mgr.remove_publisher(publisher_id)
+    await broadcaster.emit(EventType.PUBLISHER_REMOVED, info.model_dump())
+    return ComponentResponse(action="removed", component=info)
 
-@app.post("/api/subscribers")
-async def add_subscriber(topics: list[str] = ["default"]):
-    subscriber = docker_mgr.create_subscriber(topics=topics)
-    await broadcaster.emit("subscriber_added", subscriber)
-    return subscriber
+@app.post("/api/subscribers", response_model=ComponentResponse)
+async def add_subscriber(req: CreateSubscriberRequest):
+    """Spin up a new subscriber container."""
+    info = docker_mgr.create_subscriber(req)
+    await broadcaster.emit(EventType.SUBSCRIBER_ADDED, info.model_dump())
+    return ComponentResponse(action="created", component=info)
 
-@app.delete("/api/subscribers/{subscriber_id}")
-async def remove_subscriber(subscriber_id: str):
-    result = docker_mgr.remove_subscriber(subscriber_id)
-    await broadcaster.emit("subscriber_removed", result)
-    return result
+@app.delete("/api/subscribers/{subscriber_id}", response_model=ComponentResponse)
+async def remove_subscriber(subscriber_id: int):
+    info = docker_mgr.remove_subscriber(subscriber_id)
+    await broadcaster.emit(EventType.SUBSCRIBER_REMOVED, info.model_dump())
+    return ComponentResponse(action="removed", component=info)
 
 # --- System State ---
 
-@app.get("/api/state")
+@app.get("/api/state", response_model=SystemState)
 async def get_state():
     """Return full system topology and status."""
     return docker_mgr.get_system_state()
 
-@app.get("/api/state/topology")
+@app.get("/api/state/topology", response_model=TopologyResponse)
 async def get_topology():
-    """Return node connections for graph visualization."""
-    # Query each broker's /status endpoint for peer lists
-    # Return nodes and edges
-    ...
+    """Return nodes and edges for graph visualization.
+    Brokers are queried via /status for their peer lists."""
+    return docker_mgr.get_topology()
 
 # --- Snapshots ---
 
-@app.post("/api/snapshots")
-async def trigger_snapshot(initiator: str = None):
-    """Trigger Chandy-Lamport snapshot."""
-    result = docker_mgr.trigger_snapshot(initiator)
-    await broadcaster.emit("snapshot_initiated", result)
+@app.post("/api/snapshots", response_model=SnapshotStatusResponse)
+async def trigger_snapshot(req: TriggerSnapshotRequest = TriggerSnapshotRequest()):
+    """Trigger Chandy-Lamport snapshot on the specified (or first) broker."""
+    result = docker_mgr.trigger_snapshot(req.initiator_broker_id)
+    await broadcaster.emit(EventType.SNAPSHOT_INITIATED, result.model_dump())
     return result
 
-@app.get("/api/snapshots/latest")
+@app.get("/api/snapshots/latest", response_model=SnapshotStatusResponse)
 async def get_latest_snapshot():
     """Return the most recent snapshot result."""
     ...
 
 # --- Metrics ---
 
-@app.get("/api/metrics")
+@app.get("/api/metrics", response_model=MetricsResponse)
 async def get_metrics():
-    """Aggregate metrics from all brokers."""
-    # Poll each broker's /status endpoint
-    # Return aggregate: total messages, throughput, latency
-    ...
+    """Aggregate metrics from all broker /status endpoints."""
+    return docker_mgr.get_metrics()
+
+# --- Demo Seed ---
+
+@app.post("/api/seed")
+async def seed_demo():
+    """Spin up the default demo topology: 3 brokers, 2 publishers, 3 subscribers.
+    Called by `make demo` after docker-compose brings up bootstrap + orchestrator.
+    Idempotent — skips components that are already running."""
+    results = []
+    broker_ids = []
+    for _ in range(3):
+        info = docker_mgr.create_broker(CreateBrokerRequest())
+        await broadcaster.emit(EventType.BROKER_ADDED, info.model_dump())
+        broker_ids.append(info.component_id)
+        results.append(info)
+    for i in range(2):
+        info = docker_mgr.create_publisher(CreatePublisherRequest(broker_ids=broker_ids))
+        await broadcaster.emit(EventType.PUBLISHER_ADDED, info.model_dump())
+        results.append(info)
+    for i, broker_id in enumerate(broker_ids):
+        info = docker_mgr.create_subscriber(CreateSubscriberRequest(broker_id=broker_id))
+        await broadcaster.emit(EventType.SUBSCRIBER_ADDED, info.model_dump())
+        results.append(info)
+    return {"seeded": len(results), "components": results}
 
 # --- Real-Time Events (WebSocket) ---
 
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
-    """Stream real-time system events to the dashboard."""
+    """Stream real-time system events to the dashboard.
+    Each message is a JSON-serialized WebSocketEvent."""
     await websocket.accept()
     broadcaster.register(websocket)
     try:
         while True:
-            # Keep connection alive, also accept commands from frontend
-            data = await websocket.receive_text()
-            # Handle frontend commands if needed
+            await websocket.receive_text()  # keep-alive; frontend can send commands
     except WebSocketDisconnect:
         broadcaster.unregister(websocket)
 ```
 
-### 2.4 — Event Broadcasting
+### 2.5 — Event Broadcasting
 
 The orchestrator needs to push real-time events to the frontend. There are two types of events:
 
@@ -524,31 +896,66 @@ class EventBroadcaster:
         self.connections -= dead
 ```
 
-### 2.5 — Orchestrator Docker Setup
+### 2.6 — Orchestrator Docker Setup
 
-The orchestrator itself runs as a container, but it needs access to the Docker socket to manage other containers:
+**Responsibility split:**
+- `docker-compose.yml` manages only the static infrastructure: the bootstrap server and the orchestrator itself.
+- All pub-sub components (brokers, publishers, subscribers) are created exclusively via the orchestrator API.
+
+The existing docker-compose entries for `broker-1..3`, `subscriber-0..2`, and `publisher-0..1` are **removed**. The new docker-compose.yml is:
 
 ```yaml
-# Add to docker-compose.yml
-orchestrator:
-  build:
-    context: .
-    dockerfile: Dockerfile.orchestrator
-  command: uvicorn orchestrator.main:app --host 0.0.0.0 --port 9000
-  ports:
-    - "9000:9000"
-  volumes:
-    - /var/run/docker.sock:/var/run/docker.sock # Docker-in-Docker access
-  depends_on:
-    bootstrap:
-      condition: service_healthy
-  networks:
-    - aether-net
+services:
+  bootstrap:
+    build: .
+    command: aether-bootstrap --host bootstrap --port 7000 --status-port 17000
+    container_name: aether-bootstrap
+    hostname: bootstrap
+    ports:
+      - "7000:7000"
+      - "17000:17000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:17000/status')"]
+      interval: 5s
+      retries: 5
+    networks:
+      - aether-net
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    command: uvicorn aether.orchestrator.main:app --host 0.0.0.0 --port 9000
+    container_name: aether-orchestrator
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # orchestrator controls Docker
+    depends_on:
+      bootstrap:
+        condition: service_healthy
+    networks:
+      - aether-net
+
+networks:
+  aether-net:
+    driver: bridge
 ```
 
-**Deliverable:** A running FastAPI service at `localhost:9000` with full CRUD for brokers, publishers, and subscribers. `POST /api/brokers` actually spins up a new Docker container. WebSocket at `/ws/events` streams real-time system events. Full Swagger docs at `/docs`.
+**`make demo` becomes:**
 
-### 2.6 — Known Limitations & Future Work
+```makefile
+demo:
+    docker-compose up -d --build
+    @echo "Waiting for orchestrator to be ready..."
+    @until curl -sf http://localhost:9000/docs > /dev/null; do sleep 1; done
+    curl -s -X POST http://localhost:9000/api/seed | python -m json.tool
+    @echo "\nSystem seeded. Dashboard: http://localhost:3000  API docs: http://localhost:9000/docs"
+```
+
+**Deliverable:** `make demo` brings up bootstrap + orchestrator, then calls `POST /api/seed` to spin up 3 brokers, 2 publishers, and 3 subscribers via the orchestrator. The full system is running with the orchestrator as the single authority. Full Swagger docs at `localhost:9000/docs`.
+
+### 2.7 — Known Limitations & Future Work
 
 #### Hardcoded broker assignments for publishers and subscribers
 
@@ -903,7 +1310,20 @@ Add per-topic sequence numbers. Publishers embed a monotonically increasing sequ
 
 When a broker is being removed (slider goes down), instead of hard-killing it, implement a drain protocol: stop accepting new subscriptions, finish delivering in-flight messages, transfer topics to other brokers, then shut down. This is how real production systems handle rolling deployments.
 
-**Deliverable:** Fault tolerance with heartbeats, automatic topic reassignment, write-ahead logging for durability, and optional message ordering guarantees.
+### 5.6 — On-Demand Snapshot Trigger via Orchestrator (Lower Priority)
+
+Currently, brokers auto-initiate Chandy-Lamport snapshots on a timer (the lowest-address broker acts as leader). The orchestrator's `trigger_snapshot()` method in `docker_manager.py` exists but is intentionally left as `raise NotImplementedError` until this phase.
+
+Implementing it requires two changes:
+
+1. **Add a `/snapshot` POST endpoint to the broker's status server** (`aether/gossip/status.py`) that calls `broker.initiate_snapshot()` and returns the `snapshot_id`.
+2. **Implement `trigger_snapshot(initiator_broker_id)` in `DockerManager`** (`aether/orchestrator/docker_manager.py`):
+   - If `initiator_broker_id` is `None`, pick the first running broker from `self._components`
+   - POST to that broker's `/snapshot` endpoint
+   - Poll all brokers' `/status` for `snapshot_state` and populate `broker_states`
+   - Return `SnapshotStatusResponse` with `snapshot_id`, `initiator_broker_id`, `timestamp`, `broker_states`, and `status`
+
+**Deliverable:** Fault tolerance with heartbeats, automatic topic reassignment, write-ahead logging for durability, optional message ordering guarantees, and on-demand snapshot triggering from the orchestrator API.
 
 ---
 
@@ -1046,6 +1466,57 @@ graph TB
 ```
 
 **Deliverable:** A polished GitHub repository with a README that serves as both documentation and a portfolio piece. Architecture diagrams, performance charts, demo GIF, and design decision explanations.
+
+---
+
+## Phase 7: Partial Mesh Topology (Future)
+
+**Goal:** Replace the current O(N²) full-mesh broker peering with a scalable partial mesh using a consistent hashing ring, so the system can support large broker clusters without unbounded connection and heartbeat growth.
+
+### 7.1 — Why Full Mesh Doesn't Scale
+
+The current architecture has every broker peer with every other broker. The number of connections grows as N(N-1)/2:
+
+| Brokers | Total peer connections |
+| ------- | ---------------------- |
+| 3       | 3                      |
+| 5       | 10                     |
+| 10      | 45                     |
+| 20      | 190                    |
+| 50      | 1,225                  |
+
+Heartbeat traffic grows at the same rate — each broker sends a heartbeat to all N-1 peers every interval. At small cluster sizes (under ~15 brokers) this is fine. Beyond that, connection count and heartbeat overhead become a bottleneck.
+
+### 7.2 — Consistent Hashing Ring
+
+Each broker is assigned a position on a hash ring (keyed by `broker_id` or a hash of its hostname). Each broker only peers with its **K nearest neighbors** on the ring (e.g. K=2 giving each broker a left and right neighbor).
+
+- **Total connections:** O(N·K) — linear in cluster size regardless of N
+- **Gossip propagation:** Fanout + TTL still ensures messages reach the full cluster within a bounded number of hops
+- **Failure tolerance:** With K≥2, a single broker failure does not partition the ring
+
+Example with 5 brokers and K=2:
+
+```
+B1 ←→ B2 ←→ B3 ←→ B4 ←→ B5 ←→ B1  (ring wraps)
+```
+
+Each broker maintains 2 peer connections instead of 4, for a total of 5 connections vs. 10 in full mesh.
+
+### 7.3 — Changes Required
+
+| Component | Change |
+| --------- | ------ |
+| **Bootstrap** | On JOIN, compute the joining broker's ring position and return only its K neighbors instead of the full member list. Also notify existing neighbors of their new peer. |
+| **Broker** | `add_peer()` and heartbeat logic stay the same — brokers don't need to know they're in a ring. Only the initial JOIN handshake response changes. |
+| **`get_topology()`** | **No change required.** It already queries each broker's `/status` for its actual peer list, so partial mesh edges are reflected automatically. |
+| **Gossip TTL / fanout** | May need tuning — with partial mesh, messages need more hops to reach all brokers. Increase TTL proportionally to `log(N)`. |
+
+### 7.4 — Trade-offs
+
+- **Latency:** Messages may take multiple gossip hops to reach distant brokers on the ring (vs. one hop in full mesh). Acceptable for eventual-delivery semantics.
+- **Complexity:** Bootstrap must maintain ring ordering and handle broker removals (re-linking neighbors around the gap).
+- **K selection:** K=2 is the minimum for ring continuity. K=3 adds redundancy at modest cost.
 
 ---
 
