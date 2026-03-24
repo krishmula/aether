@@ -88,8 +88,8 @@ class CreatePublisherRequest(BaseModel):
 class CreateSubscriberRequest(BaseModel):
     subscriber_id: int | None = None
     broker_id: int  # required — subscriber needs exactly one broker
-    range_low: int | None = Field(default=None, ge=0, le=255)
-    range_high: int | None = Field(default=None, ge=0, le=255)
+    range_low: int = Field(ge=0, le=255)
+    range_high: int = Field(ge=0, le=255)
 
 
 class TriggerSnapshotRequest(BaseModel):
