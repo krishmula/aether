@@ -8,6 +8,9 @@ import docker.errors
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from aether.core.payload_range import partition_payload_space
+from aether.core.uint8 import UInt8
+
 from .docker_manager import DockerManager
 from .events import EventBroadcaster
 from .models import (
@@ -205,22 +208,33 @@ async def seed_demo() -> dict:
             info = docker_mgr.create_publisher(
                 CreatePublisherRequest(broker_ids=broker_ids)
             )
-            await broadcaster.emit(EventType.PUBLISHER_ADDED, info.model_dump(mode="json"))
+            await broadcaster.emit(
+                EventType.PUBLISHER_ADDED, info.model_dump(mode="json")
+            )
             created.append(info)
 
         # Subscribers: one per broker, bring total up to 3
         subscribers_needed = 3 - len(state.subscribers)
-        for broker_id in broker_ids[: max(0, subscribers_needed)]:
+        seed_ranges = partition_payload_space(UInt8(3))
+        for i, broker_id in enumerate(broker_ids[: max(0, subscribers_needed)]):
+            r = seed_ranges[i]
             info = docker_mgr.create_subscriber(
-                CreateSubscriberRequest(broker_id=broker_id)
+                CreateSubscriberRequest(
+                    broker_id=broker_id, range_low=int(r.low), range_high=int(r.high)
+                )
             )
-            await broadcaster.emit(EventType.SUBSCRIBER_ADDED, info.model_dump(mode="json"))
+            await broadcaster.emit(
+                EventType.SUBSCRIBER_ADDED, info.model_dump(mode="json")
+            )
             created.append(info)
 
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {"seeded": len(created), "components": [c.model_dump(mode="json") for c in created]}
+    return {
+        "seeded": len(created),
+        "components": [c.model_dump(mode="json") for c in created],
+    }
 
 
 # ---------------------------------------------------------------------------
