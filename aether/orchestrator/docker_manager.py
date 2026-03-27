@@ -30,6 +30,16 @@ from .settings import settings
 
 logger = logging.getLogger(__name__)
 
+_DOCKER_TO_COMPONENT_STATUS: dict[str, ComponentStatus] = {
+    "running": ComponentStatus.RUNNING,
+    "created": ComponentStatus.STARTING,
+    "restarting": ComponentStatus.STARTING,
+    "removing": ComponentStatus.STOPPING,
+    "paused": ComponentStatus.STOPPED,
+    "exited": ComponentStatus.STOPPED,
+    "dead": ComponentStatus.ERROR,
+}
+
 
 class DockerManager:
     def __init__(self) -> None:
@@ -255,6 +265,7 @@ class DockerManager:
 
     def get_system_state(self) -> SystemState:
         """Return current state of all managed components."""
+        self._sync_component_status()
         brokers, publishers, subscribers = [], [], []
         for info in self._components.values():
             if info.component_type == ComponentType.BROKER:
@@ -288,6 +299,7 @@ class DockerManager:
 
     def get_topology(self) -> TopologyResponse:
         """Build a node/edge graph by querying each broker's /status endpoint."""
+        self._sync_component_status()
         node_ids: set[str] = set()
         nodes: list[TopologyNode] = []
         for info in self._components.values():
@@ -345,6 +357,7 @@ class DockerManager:
 
     def get_metrics(self) -> MetricsResponse:
         """Aggregate metrics by polling each broker's /status endpoint."""
+        self._sync_component_status()
         brokers, publishers, subscribers = [], [], []
         for info in self._components.values():
             if info.component_type == ComponentType.BROKER:
@@ -412,6 +425,19 @@ class DockerManager:
             ):
                 return info
         raise ValueError(f"{component_type} {component_id} not found")
+
+    def _sync_component_status(self) -> None:
+        """Update each component's status to match actual Docker container state."""
+        for info in self._components.values():
+            if info.container_id is None:
+                continue
+            try:
+                container = self.client.containers.get(info.container_id)
+                info.status = _DOCKER_TO_COMPONENT_STATUS.get(
+                    container.status, ComponentStatus.ERROR
+                )
+            except docker.errors.NotFound:
+                info.status = ComponentStatus.ERROR
 
     def _running_broker_ids(self) -> list[int]:
         """Return IDs of all brokers currently in RUNNING state."""
