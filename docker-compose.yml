@@ -70,6 +70,29 @@ services:
       - aether-net
     restart: "no"
 
+  # ── dashboard ──────────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    image: aether-dashboard:latest
+    container_name: aether-dashboard
+    hostname: dashboard
+    ports:
+      - "3000:80"    # React dashboard (host 3000 → nginx 80)
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - aether-net
+    restart: "no"
+
 # ── network ───────────────────────────────────────────────────────────────
 networks:
   aether-net:
