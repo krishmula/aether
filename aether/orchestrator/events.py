@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
+
+logger = logging.getLogger(__name__)
 
 
 class EventBroadcaster:
@@ -37,6 +41,7 @@ class EventBroadcaster:
         for ws in self._connections:
             try:
                 await ws.send_text(message)
-            except Exception:
+            except (WebSocketDisconnect, RuntimeError, ConnectionError) as e:
+                logger.debug("WebSocket client disconnected during emit: %s", e)
                 dead.add(ws)
         self._connections -= dead
