@@ -1,7 +1,7 @@
 # Makefile for aether distributed messaging system
 # Targets documented in docs/instructions.md and docs/roadmap.md
 
-.PHONY: demo status logs clean build test lint up down restart ps check-ports
+.PHONY: demo status logs clean build build-dashboard test lint up down restart ps check-ports
 
 # Colors for better output
 GREEN = \033[0;32m
@@ -15,7 +15,8 @@ NC = \033[0m # No Color
 # dynamically by the orchestrator via the Docker SDK.
 BOOTSTRAP_STATUS_PORT = 17100
 ORCHESTRATOR_PORT     = 9000
-ALL_PORTS = $(BOOTSTRAP_STATUS_PORT) $(ORCHESTRATOR_PORT)
+DASHBOARD_PORT        = 3000
+ALL_PORTS = $(BOOTSTRAP_STATUS_PORT) $(ORCHESTRATOR_PORT) $(DASHBOARD_PORT)
 
 # Default target
 all: help
@@ -54,6 +55,7 @@ demo: build check-ports
 	@echo "  $(BLUE)API docs:$(NC)      http://localhost:$(ORCHESTRATOR_PORT)/docs"
 	@echo "  $(BLUE)System state:$(NC)  http://localhost:$(ORCHESTRATOR_PORT)/api/state"
 	@echo "  $(BLUE)Live events:$(NC)   ws://localhost:$(ORCHESTRATOR_PORT)/ws/events"
+	@echo "  $(BLUE)Dashboard:$(NC)     http://localhost:$(DASHBOARD_PORT)"
 
 status:
 	@echo "$(YELLOW)System state (via orchestrator):$(NC)"
@@ -73,6 +75,10 @@ clean:
 build:
 	@echo "$(YELLOW)Building Docker images...$(NC)"
 	@docker-compose build
+
+build-dashboard:
+	@echo "$(YELLOW)Building dashboard image...$(NC)"
+	@docker-compose build dashboard
 
 test:
 	@echo "$(YELLOW)Running unit tests...$(NC)"

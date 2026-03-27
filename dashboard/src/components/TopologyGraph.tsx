@@ -207,7 +207,7 @@ export default function TopologyGraph() {
 
   // Drag behavior
   const handleDragStart = useCallback(
-    (event: D3DragEvent<SVGGElement, PositionedNode, PositionedNode>, d: PositionedNode) => {
+    (_event: D3DragEvent<SVGGElement, PositionedNode, PositionedNode>, d: PositionedNode) => {
       const sim = simulation.current;
       if (sim) sim.alphaTarget(0.3).restart();
       d.fx = d.x;
