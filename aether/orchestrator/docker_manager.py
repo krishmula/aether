@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 class DockerManager:
     def __init__(self) -> None:
         self.client = docker.from_env()
-        self._components: dict[str, ComponentInfo] = (
-            {}
-        )  # container_name -> ComponentInfo
+        self._components: dict[
+            str, ComponentInfo
+        ] = {}  # container_name -> ComponentInfo
         self._ensure_network()
 
     def _ensure_network(self) -> None:
@@ -92,6 +92,7 @@ class DockerManager:
             host_status_port=host_status_port,
         )
         self._components[container_name] = info
+        info.status = ComponentStatus.RUNNING
         logger.info("Started broker %d (container %s)", broker_id, container.id[:12])
         return info
 
@@ -101,6 +102,7 @@ class DockerManager:
         container = self.client.containers.get(remove_container_info.container_id)
         container.stop(timeout=10)
         container.remove()
+        remove_container_info.status = ComponentStatus.STOPPED
         del self._components[remove_container_info.container_name]
         logger.info(
             "Removed broker %d (container %s)",
@@ -159,6 +161,7 @@ class DockerManager:
             publish_interval=req.interval,
         )
         self._components[container_name] = info
+        info.status = ComponentStatus.RUNNING
         logger.info(
             "Started publisher %d (container %s)", publisher_id, container.id[:12]
         )
@@ -170,6 +173,7 @@ class DockerManager:
         container = self.client.containers.get(info.container_id)
         container.stop(timeout=10)
         container.remove()
+        info.status = ComponentStatus.STOPPED
         del self._components[info.container_name]
         logger.info(
             "Removed publisher %d (container %s)", publisher_id, info.container_id[:12]
@@ -234,6 +238,7 @@ class DockerManager:
             range_high=req.range_high,
         )
         self._components[container_name] = info
+        info.status = ComponentStatus.RUNNING
         logger.info(
             "Started subscriber %d (container %s)", subscriber_id, container.id[:12]
         )
@@ -245,6 +250,7 @@ class DockerManager:
         container = self.client.containers.get(info.container_id)
         container.stop(timeout=10)
         container.remove()
+        info.status = ComponentStatus.STOPPED
         del self._components[info.container_name]
         logger.info(
             "Removed subscriber %d (container %s)",
