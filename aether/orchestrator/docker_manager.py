@@ -193,15 +193,7 @@ class DockerManager:
         host_port = 9100 + subscriber_id * 10
         host_status_port = 19100 + subscriber_id * 10
 
-        range_args = (
-            f"--range-low {req.range_low} --range-high {req.range_high}"
-            if req.range_low is not None and req.range_high is not None
-            else ""
-        )
-
-        print("req.broker_id", req.broker_id)
-        print("req.broker's range_low", req.range_low)
-        print("req.broker's range_high", req.range_high)
+        range_args = f"--range-low {req.range_low} --range-high {req.range_high}"
 
         container = self.client.containers.run(
             settings.aether_image,
