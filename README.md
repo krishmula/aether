@@ -1,6 +1,8 @@
 # Aether
 
-A distributed publish-subscribe messaging system built from scratch in Python. Aether implements gossip-based message propagation across a broker mesh, Chandy-Lamport distributed snapshots for fault-tolerant state capture, heartbeat-based failure detection with automatic broker recovery, and a FastAPI orchestration control plane that creates and destroys Docker containers on the fly — all wrapped in a real-time React dashboard.
+Aether is a distributed pub-sub broker with Chandy-Lamport snapshot recovery — kill a broker, watch it recover.
+
+Built from TCP sockets up: gossip-based message propagation across a broker mesh, consistent global snapshots for fault-tolerant state capture, automatic broker failover with two recovery paths, and a FastAPI orchestration control plane that manages Docker containers on the fly — all with a live React dashboard.
 
 ```
 Publisher ──→ Broker ←─ gossip ─→ Broker ──→ Subscriber
@@ -16,12 +18,68 @@ Publisher ──→ Broker ←─ gossip ─→ Broker ──→ Subscriber
 ## What Makes This Interesting
 
 - **Gossip Protocol** — Messages propagate through the broker mesh via randomized gossip with configurable fanout and TTL. UUID deduplication prevents loops without a central coordinator.
-- **Chandy-Lamport Snapshots** — Consistent global state capture across all brokers. The classic distributed systems algorithm, running for real, every 30 seconds. Snapshots are replicated to k=2 peers.
-- **Automatic Broker Recovery** — When a broker dies, its replacement requests the last snapshot from peers, restores subscriber registrations and message state, and broadcasts a recovery notification so clients reconnect transparently.
-- **Heartbeat Failure Detection** — Brokers exchange heartbeats every 5 seconds. Dead peers are detected within 15 seconds without any external health-check service.
+- **Chandy-Lamport Snapshots** — Consistent global state capture across all brokers. The classic distributed systems algorithm, running for real, every 30 seconds. Snapshots are replicated to k=2 peers so they survive broker failure.
+- **Automatic Broker Recovery** — When a broker dies, the orchestrator detects it within 15 seconds and chooses the best recovery path: replace the broker and restore full state from a fresh snapshot, or redistribute orphaned subscribers across surviving brokers.
+- **Subscriber Autonomy** — Subscribers detect broker failure independently via Ping/Pong health checks, then query the orchestrator for their new assignment and reconnect with exponential backoff. No thundering herd.
+- **Publisher Resilience** — Publishers track failed brokers and skip them during a 30s cooldown, retrying automatically after expiry.
 - **Dynamic Orchestration** — A FastAPI control plane manages broker/publisher/subscriber containers via the Docker SDK. Spin up or tear down any component with a single API call while the system keeps running.
-- **Fully Observable** — Every component (broker, publisher, subscriber, bootstrap) exposes a live JSON `/status` endpoint over HTTP using only the Python standard library.
-- **Three Deployment Modes** — Single process in-memory, distributed across localhost, or fully containerized with Docker Compose and dynamic container management.
+- **Fully Observable** — Every component exposes a live JSON `/status` endpoint over HTTP. `BROKER_DECLARED_DEAD`, `BROKER_RECOVERED`, and `SUBSCRIBER_RECONNECTED` events stream over WebSocket in real time.
+
+---
+
+## How Failover Works
+
+```
+                DETECTION                     DECISION                      EXECUTION
+          ┌──────────────────┐         ┌─────────────────────┐       ┌─────────────────────┐
+          │                  │         │                     │       │                     │
+Orch.     │  Poll broker     │ Broker  │  Query peers for    │ Fresh │  Replacement Path   │
+Health    │  /status every   │ declared│  dead broker's      │ snap? │  - Spin up new      │
+Monitor   │  5s. 3 consec.   ├─dead──► │  snapshot replicas  ├─YES─► │    broker (same ID) │
+          │  failures = dead │         │  Check vs 30s       │       │  - POST /recover    │
+          │                  │         │  threshold          │       │  - Restore full     │
+          └──────────────────┘         └─────────┬───────────┘       │    state from snap  │
+                                                 │                   └─────────────────────┘
+          ┌──────────────────┐                   │ NO
+          │                  │                   ▼                   ┌─────────────────────┐
+Subscriber│  Ping broker     │                                       │                     │
+Health    │  every 5s.       │                                       │  Redistribution     │
+Check     │  No pong for     │                                       │  - Find orphaned    │
+          │  15s = enter     │                                       │    subscribers      │
+          │  reconnect loop  │                                       │  - Assign to least- │
+          └───────┬──────────┘                                       │    loaded broker    │
+                  │ reconnect                                        └─────────────────────┘
+                  ▼
+          ┌──────────────────┐
+          │  GET /api/       │
+          │  assignment?     │  ← orchestrator is the single
+          │  subscriber_id=X │    source of truth for
+          │                  │    subscriber→broker mapping
+          │  Exponential     │
+          │  backoff + jitter│
+          └──────────────────┘
+```
+
+**Path A (Replacement):** When a snapshot was taken within the last 30 seconds, Aether spins up a new broker on the same address, calls `POST /recover`, and restores the dead broker's full state — subscriber registrations, message dedup history, and peer list. Subscribers are transparently redirected. Nothing is lost except messages in-flight at the moment of failure.
+
+**Path B (Redistribution):** When no fresh snapshot is available, Aether reassigns orphaned subscribers to the surviving broker with the fewest current subscribers. Subscribers reconnect via the same pull-based assignment API. Message history is not restored, but the system stays live.
+
+---
+
+## How Chandy-Lamport Works (in 60 seconds)
+
+The challenge with distributed snapshots: you can't just pause all nodes and read their state — by the time you read node B, node A has already changed.
+
+Chandy-Lamport solves this with **markers**: a special message injected into every channel. When a node receives a marker, it records its current state and stops recording incoming messages on that channel. When all channels have a marker, the global snapshot is consistent.
+
+In Aether:
+1. The lead broker (lowest address) initiates a snapshot every 30 seconds.
+2. It records its own state (subscribers, dedup history, peer list) and sends a `SnapshotMarker` to all peers.
+3. Each peer records its state on first marker receipt, then forwards the marker.
+4. Once all markers are acknowledged, each broker replicates its snapshot to k=2 random peers.
+5. If that broker later dies, any peer that received a copy can serve it via `GET /snapshots/{host}/{port}`.
+
+The replacement broker calls `POST /recover`, which fetches the snapshot from a peer and restores state — same subscribers, same dedup window, same peer list.
 
 ---
 
@@ -29,12 +87,10 @@ Publisher ──→ Broker ←─ gossip ─→ Broker ──→ Subscriber
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Python | 3.13+ | Required for the local and distributed modes |
-| Docker | 24+ | Required for the containerized mode |
+| Python | 3.13+ | Required for local and distributed modes |
+| Docker | 24+ | Required for containerized mode |
 | Docker Compose | v2 (`docker compose`) | Included with Docker Desktop |
-| `make` | any | Optional but recommended; all commands are documented below |
-
-Check your versions:
+| `make` | any | Optional but recommended |
 
 ```bash
 python --version   # need 3.13+
@@ -44,31 +100,20 @@ docker compose version
 
 ---
 
-## Quickest Path: Docker Demo
-
-The fastest way to see Aether running with a full topology and live dashboard:
+## Quick Start
 
 ```bash
 git clone https://github.com/krishmula/aether.git
 cd aether
 make demo
+open http://localhost:3000
 ```
 
-This builds both Docker images (Python backend + React dashboard), starts bootstrap, orchestrator, and dashboard containers, waits for them to become healthy, then seeds a default topology of **3 brokers, 2 publishers, and 3 subscribers** — all as dynamically managed containers.
-
-Once ready:
-
-| Service | URL | What you'll find |
-|---|---|---|
-| **Dashboard** | http://localhost:3000 | Live topology graph, metrics, component controls |
-| **API Docs** | http://localhost:9000/docs | Interactive Swagger UI for the orchestrator |
-| **System State** | http://localhost:9000/api/state | Full JSON state of every component |
-| **Bootstrap Status** | http://localhost:17100/status | Registered brokers and uptime |
+This builds both Docker images, starts the infrastructure, and seeds a topology of **3 brokers, 2 publishers, 3 subscribers**.
 
 When you're done:
-
 ```bash
-make clean   # stops and removes all containers (compose-managed + dynamic)
+make clean
 ```
 
 ---
@@ -77,41 +122,29 @@ make clean   # stops and removes all containers (compose-managed + dynamic)
 
 ### Mode 1 — Local (single process, no networking)
 
-Everything runs in memory within a single Python process. No sockets, no Docker. Great for testing the core logic.
+Everything in memory. No sockets, no Docker. Great for testing the core logic.
 
 ```bash
 pip install -e ".[dev]"
 aether-admin 4 --publish-interval 0.05 --duration 2 --seed 123
 ```
 
-**Arguments:**
-- `4` — number of subscribers (payload space is partitioned evenly across them)
-- `--publish-interval 0.05` — seconds between published messages
-- `--duration 2` — how long to run (seconds)
-- `--seed 123` — deterministic random seed for reproducibility
-
-**Expected output:** Message counts per subscriber showing the payload distribution across the 256-value space.
+**Arguments:** number of subscribers, `--publish-interval` seconds, `--duration` seconds, `--seed` for reproducibility.
 
 ---
 
 ### Mode 2 — Distributed (all-in-one on localhost, real TCP)
 
-All components run as separate threads with real TCP sockets on localhost. Tests the full network stack — gossip propagation, heartbeats, snapshot protocol — without Docker.
+All components run as separate threads with real TCP sockets on localhost.
 
 ```bash
 pip install -e ".[dev]"
 aether-distributed 3 2 2 --publish-interval 0.5 --duration 10 --seed 42
-#                  │ │ │
 #                  │ │ └── 2 publishers
 #                  │ └──── 2 subscribers per broker
 #                  └────── 3 brokers
-```
 
-The bootstrap server starts first, brokers register and form the mesh, publishers connect and begin gossip propagation, and subscribers receive delivery notifications. Chandy-Lamport snapshots fire every 30 seconds (configurable).
-
-Or use the Makefile shortcut:
-
-```bash
+# or:
 make distributed-demo
 ```
 
@@ -119,112 +152,56 @@ make distributed-demo
 
 ### Mode 3 — Docker (fully containerized, orchestrated)
 
-The full production-style setup. Bootstrap and orchestrator are compose-managed; all pub/sub components are created dynamically by the orchestrator via the Docker SDK (Docker-out-of-Docker).
+The full setup. Bootstrap and orchestrator are compose-managed; all pub/sub components are created dynamically via the Docker SDK.
 
 #### Step 1 — Build
 
 ```bash
 make build
-# or manually:
-docker compose build
 ```
-
-This builds two images:
-- `aether:latest` — Python 3.13-slim with all backend dependencies
-- `aether-dashboard:latest` — Node build stage → nginx serve
 
 #### Step 2 — Start infrastructure
 
 ```bash
 make up
-# or:
-docker compose up -d
-```
-
-This starts three containers with health checks:
-1. **aether-bootstrap** — peer discovery server, waits for `/status` to respond
-2. **aether-orchestrator** — FastAPI control plane, waits for bootstrap to be healthy
-3. **aether-dashboard** — nginx serving the React app, waits for orchestrator to be healthy
-
-Check everything is healthy:
-
-```bash
-make ps
-# or:
-docker compose ps
+make ps   # verify all three services are healthy
 ```
 
 #### Step 3 — Create topology
-
-Seed the default topology (3 brokers, 2 publishers, 3 subscribers):
 
 ```bash
 curl -X POST http://localhost:9000/api/seed
 ```
 
-Or build your own manually:
+Or manually:
 
 ```bash
-# Add brokers
-curl -X POST http://localhost:9000/api/brokers
-curl -X POST http://localhost:9000/api/brokers
-curl -X POST http://localhost:9000/api/brokers
-
-# Add publishers
+curl -X POST http://localhost:9000/api/brokers       # repeat 3×
 curl -X POST http://localhost:9000/api/publishers \
-  -H 'Content-Type: application/json' \
-  -d '{"interval": 0.5}'
-
-# Add a subscriber attached to broker 0
+  -H 'Content-Type: application/json' -d '{"interval": 0.5}'
 curl -X POST http://localhost:9000/api/subscribers \
-  -H 'Content-Type: application/json' \
-  -d '{"broker_id": 0}'
+  -H 'Content-Type: application/json' -d '{"broker_id": 0}'
 ```
 
 #### Step 4 — Explore
 
 ```bash
-# Full system state
+open http://localhost:3000          # React dashboard
+open http://localhost:9000/docs     # Swagger UI
 curl http://localhost:9000/api/state | python3 -m json.tool
-
-# Graph topology (nodes + edges for visualization)
-curl http://localhost:9000/api/state/topology | python3 -m json.tool
-
-# Aggregated metrics
-curl http://localhost:9000/api/metrics | python3 -m json.tool
-
-# Live event stream (WebSocket)
-# Connect to ws://localhost:9000/ws/events to receive real-time component events
-
-# Dashboard
-open http://localhost:3000
-
-# Interactive API docs
-open http://localhost:9000/docs
-```
-
-#### Remove components dynamically
-
-```bash
-# Remove a broker (its subscribers get notified for failover)
-curl -X DELETE http://localhost:9000/api/brokers/0
-
-# Remove a publisher
-curl -X DELETE http://localhost:9000/api/publishers/0
 ```
 
 #### Tear down
 
 ```bash
-make clean
-# This stops both compose-managed services AND all dynamically created containers
+make clean   # stops compose services + all dynamic containers
 ```
 
 ---
 
 ### Mode 4 — Multi-machine (Tailscale / LAN)
 
-For running across real physical or virtual machines. Set Tailscale or LAN IPs in `config.yaml`:
+Set Tailscale or LAN IPs in `config.yaml`:
 
 ```yaml
 bootstrap:
@@ -235,21 +212,7 @@ brokers:
   - id: 1
     host: "100.x.x.34"
     port: 8000
-  - id: 2
-    host: "100.x.x.35"
-    port: 8000
-
-gossip:
-  fanout: 2             # relay to 2 random peers per hop
-  ttl: 5                # discard after 5 hops
-  heartbeat_interval: 5.0
-  heartbeat_timeout: 15.0
-
-snapshot:
-  interval: 30.0
 ```
-
-Point each process at the config:
 
 ```bash
 export AETHER_CONFIG=/path/to/config.yaml
@@ -263,65 +226,85 @@ aether-broker    --host 100.x.x.34 --port 8000 --status-port 18000 --id 1
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Publisher   │     │  Publisher   │     │  Publisher   │
+│  Publisher  │     │  Publisher  │     │  Publisher  │
 └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
        │                   │                   │
        ▼                   ▼                   ▼
-┌─────────────┐◄──gossip──►┌─────────────┐◄──gossip──►┌─────────────┐
-│   Broker 0  │            │   Broker 1  │            │   Broker 2  │
-│             │◄──heartbeat►│             │◄──heartbeat►│             │
-│  snapshot   │            │  snapshot   │            │  snapshot   │
-└──────┬──────┘            └──────┬──────┘            └──────┬──────┘
-       │                          │                          │
-       ▼                          ▼                          ▼
-┌───────────┐             ┌───────────┐             ┌───────────┐
-│Subscriber │             │Subscriber │             │Subscriber │
-└───────────┘             └───────────┘             └───────────┘
+┌─────────────┐◄─gossip──►┌─────────────┐◄─gossip──►┌─────────────┐
+│   Broker 0  │           │   Broker 1  │           │   Broker 2  │
+│  [snapshot] │◄─heartbt─►│  [snapshot] │◄─heartbt─►│  [snapshot] │
+└──────┬──────┘           └──────┬──────┘           └──────┬──────┘
+       │                         │                         │
+       ▼                         ▼                         ▼
+┌───────────┐            ┌───────────┐            ┌───────────┐
+│Subscriber │            │Subscriber │            │Subscriber │
+│ (Ping/♡)  │            │ (Ping/♡)  │            │ (Ping/♡)  │
+└───────────┘            └───────────┘            └───────────┘
 
-                    ┌─────────────┐
-                    │  Bootstrap  │  (peer discovery)
-                    └─────────────┘
+                   ┌─────────────┐
+                   │  Bootstrap  │  (peer discovery)
+                   └─────────────┘
 
-                    ┌─────────────┐
-                    │Orchestrator │  (FastAPI + Docker SDK)
-                    └─────────────┘
+                   ┌─────────────────────────┐
+                   │      Orchestrator       │
+                   │  HealthMonitor (asyncio)│
+                   │  RecoveryManager        │
+                   │  GET /api/assignment    │
+                   └─────────────────────────┘
 ```
 
 ### Components
 
 | Component | Role | Default Ports |
 |---|---|---|
-| **Bootstrap** | Peer discovery — brokers register here, receive membership updates | TCP `7000`, HTTP `/status` on `17000` |
-| **Broker** | Message routing, gossip relay, snapshot coordination, failure detection | TCP `8000+`, HTTP `/status` on `18000+` |
-| **Publisher** | Generates `UInt8` messages, sends to N random brokers | TCP `9000+`, HTTP `/status` on `19000+` |
-| **Subscriber** | Receives messages matching its `[low, high]` payload range | TCP `10000+`, HTTP `/status` on `20000+` |
-| **Orchestrator** | FastAPI control plane — dynamic container lifecycle management | HTTP `9000` |
+| **Bootstrap** | Peer discovery — brokers register here, receive membership updates | TCP `7000`, HTTP `17000` |
+| **Broker** | Message routing, gossip relay, snapshot coordination, Ping/Pong | TCP `8000+`, HTTP `18000+` |
+| **Publisher** | Generates `UInt8` messages, sends to N random brokers with dead-broker cooldown | TCP `9000+` |
+| **Subscriber** | Receives messages matching its `[low, high]` payload range; detects dead broker via Ping | TCP `10000+` |
+| **Orchestrator** | FastAPI control plane — health monitoring, recovery decisions, assignment registry | HTTP `9000` |
 | **Dashboard** | React + D3 real-time visualization | HTTP `3000` |
-
-Each component is an **independent process** with its own TCP socket and HTTP status endpoint, mapping 1:1 to a Docker container.
 
 ### Message Flow
 
 1. **Publisher** creates a `GossipMessage` with a UUID, TTL=5, and random `UInt8` payload; sends to N random brokers.
 2. **Broker** deduplicates by UUID, delivers to local subscribers whose `PayloadRange` includes the payload, gossips to random peers (fanout=2, TTL decremented).
-3. **Subscriber** receives `PayloadMessageDelivery`, increments `counts[payload]` in its 256-element array. The payload space `[0, 255]` is partitioned evenly across all subscribers.
+3. **Subscriber** receives `PayloadMessageDelivery`, increments `counts[payload]` in its 256-element array.
 
 ### Fault Tolerance
 
-1. **Heartbeat** — Brokers exchange heartbeats every 5 seconds over TCP. No response within 15 seconds marks the peer as dead.
-2. **Snapshot** — The leader broker (lowest TCP address) initiates a Chandy-Lamport consistent global snapshot every 30 seconds. All brokers close their incoming channels on marker receipt and record local state.
-3. **Replication** — Each broker replicates its snapshot to k=2 random peers.
-4. **Recovery** — A replacement broker requests the last snapshot from known peers, restores subscriber registrations and message state, sends `BrokerRecoveryNotification` so subscribers transparently reconnect.
+1. **Orchestrator health monitor** — polls each broker's `/status` every 5s. 3 consecutive failures → broker declared dead.
+2. **Subscriber Ping/Pong** — subscribers independently ping their broker every 5s. 15s without a Pong → enter reconnect loop with exponential backoff + jitter.
+3. **Snapshot replication** — each broker replicates its Chandy-Lamport snapshot to k=2 peers; surviving peers serve the snapshot via `GET /snapshots/{host}/{port}`.
+4. **Path A (replacement)** — fresh snapshot (<30s old) → spin up replacement container, `POST /recover`, restore full state.
+5. **Path B (redistribution)** — no fresh snapshot → reassign orphaned subscribers to least-loaded surviving brokers.
+6. **Pull-based reassignment** — subscribers query `GET /api/assignment?subscriber_id=N` to learn their new broker. Missed push notifications are recovered naturally on next poll.
+
+---
+
+## Aether vs Production Systems
+
+| Feature | Aether | Kafka | NATS JetStream |
+|---|---|---|---|
+| **Primary goal** | Demonstrate distributed systems concepts end-to-end | High-throughput durable log | Low-latency cloud-native messaging |
+| **Failure detection** | HealthMonitor (HTTP polls) + Ping/Pong | ZooKeeper / KRaft session timeout | RAFT heartbeat |
+| **State recovery** | Chandy-Lamport snapshot → replacement broker | Log replay from any replica | JetStream stream replication |
+| **Subscriber reconnect** | Pull-based `/api/assignment` with backoff | Consumer group rebalance protocol | Client reconnect with server-side streams |
+| **Persistence** | None (in-memory) | Durable log on disk | Durable streams on disk |
+| **Production-grade** | No | Yes | Yes |
+| **Lines of code** | ~3k | ~500k | ~200k |
+
+Aether is a demo system, not a production message broker. It implements the same *concepts* — consistent snapshots, pull-based consumer assignment, hybrid recovery paths — using the same algorithmic foundations. The difference is operational maturity, persistence, and scale.
 
 ---
 
 ## Dashboard
 
-The React dashboard connects to the orchestrator's WebSocket and REST API to show the live system:
+The React dashboard connects to the orchestrator's WebSocket and REST API:
 
-- **Topology Graph** — D3 force-directed graph of brokers, publishers, and subscribers with animated data flow edges
-- **Metrics Panel** — Messages processed, active components, uptime, message rates
-- **Control Panel** — Add and remove brokers, publishers, and subscribers without leaving the browser
+- **Topology Graph** — D3 force-directed graph of brokers, publishers, and subscribers with animated data flow edges. Brokers flash red on `BROKER_DECLARED_DEAD` events.
+- **Metrics Panel** — Messages processed, active components, uptime, message rates.
+- **Control Panel** — Add and remove brokers, publishers, and subscribers without leaving the browser.
+- **Event Feed** — Real-time stream of `BROKER_DECLARED_DEAD`, `BROKER_RECOVERED`, `SUBSCRIBER_RECONNECTED` events.
 
 Open http://localhost:3000 after `make demo` or `make up`.
 
@@ -342,30 +325,46 @@ Full interactive docs at http://localhost:9000/docs.
 | `GET` | `/api/state` | Full system state (all components, live status) |
 | `GET` | `/api/state/topology` | Node/edge graph for visualization |
 | `GET` | `/api/metrics` | Aggregated metrics across all brokers |
+| `GET` | `/api/assignment` | `?subscriber_id=N` — returns current broker assignment |
 | `POST` | `/api/seed` | Idempotent seed: 3 brokers + 2 publishers + 3 subscribers |
-| `WS` | `/ws/events` | Real-time event stream (component added, removed, state changes) |
+| `WS` | `/ws/events` | Real-time event stream |
+
+---
+
+## Broker HTTP Endpoints
+
+Each broker exposes control endpoints alongside `/status`:
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/status` | Live broker metrics (peers, subscribers, snapshot state) |
+| `GET` | `/snapshots/{host}/{port}` | Return stored snapshot for a given broker address |
+| `POST` | `/recover` | Restore state from a peer's snapshot (used by RecoveryManager) |
+
+```bash
+# Query broker-1's stored snapshot of broker-2
+curl http://localhost:18001/snapshots/broker-2/8002
+
+# Trigger recovery on a replacement broker
+curl -X POST http://localhost:18002/recover \
+  -H 'Content-Type: application/json' \
+  -d '{"dead_broker_host": "broker-2", "dead_broker_port": 8002}'
+```
 
 ---
 
 ## Component Status Endpoints
 
-Every running component exposes a `/status` endpoint that returns live metrics. These use Python's built-in `ThreadingHTTPServer` — no framework required.
+Every component exposes `/status` via Python's stdlib `ThreadingHTTPServer`.
 
 ```bash
-# Bootstrap
-curl http://localhost:17100/status
-
-# Broker (status port = TCP port + 10000)
-curl http://localhost:18001/status
-
-# Publisher
-curl http://localhost:19001/status
-
-# Subscriber
-curl http://localhost:20001/status
+curl http://localhost:17100/status   # Bootstrap
+curl http://localhost:18001/status   # Broker (status port = TCP port + 10000)
+curl http://localhost:19001/status   # Publisher
+curl http://localhost:20001/status   # Subscriber
 ```
 
-Example broker status response:
+Example broker status:
 
 ```json
 {
@@ -384,67 +383,51 @@ Example broker status response:
 
 ---
 
+## Running Tests
+
+```bash
+pip install -e ".[dev]"
+
+# All tests (excluding legacy integration scripts)
+pytest --ignore=tests/integration/test_snapshot_recovery.py \
+       --ignore=tests/integration/test_tcp_basic.py -q
+
+# Unit tests only (fast, no real sockets)
+pytest tests/unit/ -q
+
+# Phase 1 integration tests (real GossipBroker instances, ~20s)
+pytest tests/integration/test_failover_e2e.py -v
+```
+
+**Test coverage (Phase 1):** 99 tests passing across 8 unit test files and the e2e integration suite.
+
+| File | What it tests |
+|---|---|
+| `test_node_address.py` | Hostname-based equality, hash consistency |
+| `test_health_monitor.py` | 3-failure callback, counter reset, concurrent polling |
+| `test_recovery_manager.py` | Path A (fresh snapshot), Path B (stale), retry-with-backoff |
+| `test_assignment_endpoint.py` | `GET /api/assignment` — found, not found, broker dead |
+| `test_broker_status_extended.py` | `POST /recover`, `GET /snapshots`, bootstrap deregister |
+| `test_subscriber_reconnect.py` | Ping/Pong timeout, epoch dedup, reconnect backoff |
+| `test_publisher_cooldown.py` | Dead-broker skipping, cooldown expiry, retry |
+| `test_failover_e2e.py` | Real brokers, mock orchestrator, full broker kill + reconnect |
+
+---
+
 ## Makefile Reference
 
 ```bash
 make demo             # Build, start, seed 3+2+3 topology (fastest path)
 make status           # Query system state via API
-make logs             # Tail all container logs (Ctrl+C to stop)
+make logs             # Tail all container logs
 make clean            # Stop all containers — compose + dynamic
 make build            # Build Docker images
-make build-dashboard  # Rebuild only the React dashboard image
 make up               # Start compose services in background
-make down             # Stop compose services (keeps dynamic containers)
-make restart          # Restart compose services
+make down             # Stop compose services
 make ps               # Show container status
-make check-ports      # Verify ports 17100, 9000, 3000 are free
-make install          # pip install -e ".[dev]"
-make local-demo       # Run single-process local mode
-make distributed-demo # Run all-in-one distributed mode
 make test             # Run unit tests
 make lint             # ruff + mypy
 ```
-
----
-
-## CLI Reference
-
-Each component can run as a standalone process for manual or multi-machine deployments:
-
-| Command | Description |
-|---|---|
-| `aether-admin` | Single-process local mode (all in-memory, no networking) |
-| `aether-distributed` | All-in-one distributed mode on localhost |
-| `aether-bootstrap` | Standalone bootstrap server |
-| `aether-broker` | Standalone broker process |
-| `aether-publisher` | Standalone publisher process |
-| `aether-subscriber` | Standalone subscriber process |
-
-All standalone commands accept `--host`, `--port`, `--status-port`, and `--log-level`.
-
----
-
-## Running Tests
-
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Unit tests (fast, no networking)
-pytest tests/unit/ --tb=short
-
-# Integration tests (real TCP sockets, ~30s each)
-python tests/integration/test_tcp_basic.py          # NetworkNode connectivity
-python tests/integration/test_heartbeat.py          # failure detection & timeout
-python tests/integration/test_snapshot_full.py      # end-to-end snapshot & recovery
-python tests/integration/test_e2e.py                # full system as subprocesses
-
-# Linting
-ruff check .
-mypy aether/
-```
-
-The integration tests spawn real processes and exercise the full network stack — gossip propagation, Chandy-Lamport markers, snapshot replication, and broker recovery — without Docker.
 
 ---
 
@@ -453,44 +436,47 @@ The integration tests spawn real processes and exercise the full network stack �
 ```
 aether/
 ├── core/                   # Pure in-process data types
-│   ├── uint8.py            # UInt8 constrained integer (0–255)
-│   ├── message.py          # Immutable message with UInt8 payload
-│   ├── payload_range.py    # PayloadRange & partition_payload_space()
-│   ├── subscriber.py       # Local subscriber (256-element counts array)
-│   ├── broker.py           # In-memory message router (256 buckets)
-│   └── publisher.py        # Local publisher
+│   ├── uint8.py
+│   ├── message.py
+│   ├── payload_range.py
+│   ├── subscriber.py
+│   ├── broker.py
+│   └── publisher.py
 ├── network/                # TCP networking layer
-│   ├── node.py             # NodeAddress, NetworkNode, persistent connections
-│   ├── publisher.py        # NetworkPublisher (gossip-aware, sends to N brokers)
-│   └── subscriber.py       # NetworkSubscriber (remote delivery over TCP)
-├── gossip/                 # Gossip protocol implementation
-│   ├── protocol.py         # All protocol message types (dataclasses + pickle)
-│   ├── broker.py           # GossipBroker — routing, gossip, heartbeat, snapshot
+│   ├── node.py             # NodeAddress (hostname-based identity), NetworkNode
+│   ├── publisher.py        # NetworkPublisher (dead-broker cooldown)
+│   └── subscriber.py       # NetworkSubscriber (Ping/Pong + reconnect loop)
+├── gossip/                 # Gossip protocol
+│   ├── protocol.py         # All protocol message types
+│   ├── broker.py           # GossipBroker (routing, gossip, heartbeat, snapshot, Pong)
 │   ├── bootstrap.py        # Bootstrap peer discovery server
-│   └── status.py           # HTTP /status server (stdlib ThreadingHTTPServer)
+│   └── status.py           # HTTP status server (POST /recover, GET /snapshots)
 ├── orchestrator/           # FastAPI control plane
-│   ├── main.py             # REST endpoints + WebSocket event stream
-│   ├── docker_manager.py   # Docker SDK — container lifecycle management
-│   ├── models.py           # Pydantic request/response models
-│   ├── events.py           # EventBroadcaster for real-time WebSocket push
+│   ├── main.py             # REST + WebSocket endpoints (incl. GET /api/assignment)
+│   ├── health.py           # HealthMonitor asyncio task
+│   ├── recovery.py         # RecoveryManager (Path A + Path B)
+│   ├── docker_manager.py   # Docker SDK container lifecycle
+│   ├── models.py           # Pydantic models + EventType enum
+│   ├── events.py           # WebSocket event broadcaster
 │   └── settings.py         # Environment-based configuration
-├── snapshot.py             # Chandy-Lamport snapshot types
+├── snapshot.py             # Chandy-Lamport types (incl. Ping, Pong)
 ├── config.py               # YAML config loader
-└── cli/                    # CLI entry points (registered in pyproject.toml)
+└── cli/                    # CLI entry points
 dashboard/
 ├── src/
 │   ├── components/         # React components (Topology, Metrics, Controls)
 │   ├── api/                # Fetch wrapper + TypeScript types
 │   └── store/              # Zustand state management
-├── Dockerfile              # Node build → nginx serve
-└── nginx.conf              # Reverse proxy to orchestrator API
+├── Dockerfile
+└── nginx.conf
 tests/
-├── unit/                   # 15 tests — data types and status endpoints
-└── integration/            # TCP, heartbeat, snapshot, recovery, e2e
+├── unit/                   # 8 test files, 96 tests
+└── integration/            # test_failover_e2e.py (3 end-to-end tests)
 docs/
-├── architecture.md         # Detailed system design and message flows
-├── roadmap.md              # Phase-by-phase development plan
-└── instructions.md         # Extended setup and usage guide
+├── TODO.md                 # Implementation plan and completion checklist
+├── broker-failover-plan.md # Failover architecture design
+├── failover-flow.md        # Recovery flow diagrams
+└── observability-plan.md   # Phase 2 observability plan (OTel + Grafana)
 ```
 
 ---
@@ -501,12 +487,13 @@ docs/
 
 **Frontend:** React 19, TypeScript, Vite, D3 (force-directed graphs), Zustand, Tailwind CSS
 
-**Infrastructure:** Docker, Docker Compose, nginx (dashboard reverse proxy)
+**Infrastructure:** Docker, Docker Compose, nginx
 
 ---
 
-## Documentation
+## Known Limitations
 
-- [Architecture & Flows](docs/architecture.md) — Threading model, protocol sequences, gossip internals, snapshot algorithm walkthrough
-- [Setup & Usage Guide](docs/instructions.md) — Extended installation, deployment modes, configuration reference
-- [Development Roadmap](docs/roadmap.md) — Phase-by-phase plan and progress
+- **Not production-grade** — no authentication, no TLS, no persistence. Messages are dropped on broker failure in Path B.
+- **Single orchestrator** — no HA for the orchestrator itself. If it crashes, automated failover pauses until restart.
+- **No message replay** — subscribers that missed messages during failover don't get them back.
+- **Docker-only failover** — the recovery path depends on Docker container lifecycle management, not a general library.
