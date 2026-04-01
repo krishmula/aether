@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import docker.errors
@@ -13,8 +14,11 @@ from aether.core.uint8 import UInt8
 
 from .docker_manager import DockerManager
 from .events import EventBroadcaster
+from .health import HealthMonitor
 from .models import (
     ComponentResponse,
+    ComponentStatus,
+    ComponentType,
     CreateBrokerRequest,
     CreatePublisherRequest,
     CreateSubscriberRequest,
@@ -25,6 +29,8 @@ from .models import (
     TopologyResponse,
     TriggerSnapshotRequest,
 )
+from .recovery import RecoveryManager
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +44,12 @@ app.add_middleware(
 
 docker_mgr = DockerManager()
 broadcaster = EventBroadcaster()
+recovery_mgr = RecoveryManager(docker_mgr, broadcaster, settings)
+
+
+# ---------------------------------------------------------------------------
+# Subscriber Reconnect
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +246,78 @@ async def seed_demo() -> dict:
     return {
         "seeded": len(created),
         "components": [c.model_dump(mode="json") for c in created],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Health monitoring & recovery
+# ---------------------------------------------------------------------------
+
+
+@app.on_event("startup")
+async def start_health_monitoring() -> None:
+    health_monitor = HealthMonitor(
+        components=docker_mgr._components,
+        on_broker_dead=recovery_mgr.handle_broker_dead,
+    )
+    asyncio.create_task(health_monitor.run())
+
+
+@app.get("/api/assignments")
+async def get_assignments() -> dict:
+    """Return current subscriber → broker mappings."""
+    assignments = [
+        {
+            "subscriber_id": info.component_id,
+            "broker_id": info.broker_id,
+        }
+        for info in docker_mgr._components.values()
+        if info.component_type == ComponentType.SUBSCRIBER
+        and info.broker_id is not None
+    ]
+    return {"assignments": assignments}
+
+
+@app.get("/api/assignment")
+async def get_assignment(subscriber_id: int) -> dict:
+    """Return the broker currently assigned to a subscriber.
+
+    Used by subscribers during reconnection: after detecting their broker is
+    dead (via Ping/Pong timeout), they query this endpoint to find where to
+    reconnect. Returns 404 if the subscriber is unknown or its assigned broker
+    is not yet running (subscriber should retry with backoff).
+    """
+    subscriber = next(
+        (
+            info
+            for info in docker_mgr._components.values()
+            if info.component_type == ComponentType.SUBSCRIBER
+            and info.component_id == subscriber_id
+        ),
+        None,
+    )
+    if subscriber is None or subscriber.broker_id is None:
+        raise HTTPException(status_code=404, detail="subscriber not found")
+
+    broker = next(
+        (
+            info
+            for info in docker_mgr._components.values()
+            if info.component_type == ComponentType.BROKER
+            and info.component_id == subscriber.broker_id
+        ),
+        None,
+    )
+    if broker is None or broker.status not in (
+        ComponentStatus.RUNNING,
+        ComponentStatus.STARTING,
+    ):
+        raise HTTPException(status_code=404, detail="broker not available")
+
+    return {
+        "subscriber_id": subscriber_id,
+        "broker_host": broker.hostname,
+        "broker_port": broker.internal_port,
     }
 
 

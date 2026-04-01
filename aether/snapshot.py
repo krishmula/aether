@@ -73,6 +73,22 @@ class SnapshotResponse:
 
 
 @dataclass
+class Ping:
+    """Health-check ping sent by a subscriber to its broker."""
+
+    sender: NodeAddress
+    sequence: int
+
+
+@dataclass
+class Pong:
+    """Reply from a broker to a subscriber's Ping."""
+
+    sender: NodeAddress
+    sequence: int
+
+
+@dataclass
 class BrokerRecoveryNotification:
     """
     Notification from a recovered broker to its subscribers.

@@ -96,4 +96,5 @@ services:
 # ── network ───────────────────────────────────────────────────────────────
 networks:
   aether-net:
+    name: aether-net
     driver: bridge

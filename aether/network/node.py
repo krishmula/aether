@@ -17,13 +17,12 @@ class NodeAddress:
 
     @staticmethod
     def _normalize_host(host: str) -> str:
-        """Convert hostnames like 'localhost' to their standard IP representation.
-        This ensures consistent comparisons between NodeAddress instances.
+        """Store the host string as-is for stable hostname-based identity.
+        Docker hostnames (e.g. 'broker-2') remain valid across container restarts;
+        IP-based identity breaks when Docker assigns a new IP to a restarted container.
+        OS-level resolution (socket.connect/bind) still resolves names at call time.
         """
-        try:
-            return socket.gethostbyname(host)
-        except socket.gaierror:
-            return host
+        return host
 
     def __eq__(self, other):
         if not isinstance(other, NodeAddress):

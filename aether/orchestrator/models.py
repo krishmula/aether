@@ -35,6 +35,12 @@ class EventType(StrEnum):
     SUBSCRIBER_REMOVED = "subscriber_removed"
     COMPONENT_STATUS_CHANGED = "component_status_changed"
 
+    # Failover events
+    BROKER_DECLARED_DEAD = "broker_declared_dead"
+    BROKER_RECOVERY_STARTED = "broker_recovery_started"
+    BROKER_RECOVERED = "broker_recovered"
+    SUBSCRIBER_RECONNECTED = "subscriber_reconnected"
+
     # System events (from log tailing)
     MESSAGE_PUBLISHED = "message_published"
     MESSAGE_DELIVERED = "message_delivered"

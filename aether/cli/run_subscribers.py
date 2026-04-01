@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -64,6 +65,12 @@ def main():
         default=None,
         help="Payload range high bound (0-255, for dynamic orchestration)",
     )
+    parser.add_argument(
+        "--orchestrator-url",
+        default=None,
+        help="Orchestrator base URL for broker assignment queries (e.g. http://orchestrator:8001). "
+             "Falls back to AETHER_ORCHESTRATOR_URL env var.",
+    )
     args = parser.parse_args()
 
     config = get_config(args.config)
@@ -118,7 +125,13 @@ def main():
     address = NodeAddress(host, port)
     status_port = args.status_port if args.status_port is not None else port + 10000
 
-    sub = NetworkSubscriber(address)
+    orchestrator_url = args.orchestrator_url or os.environ.get("AETHER_ORCHESTRATOR_URL")
+
+    sub = NetworkSubscriber(
+        address,
+        orchestrator_url=orchestrator_url,
+        subscriber_id=args.subscriber_id,
+    )
     sub._status_port = status_port
     sub.connect_to_broker(broker_addr)
 

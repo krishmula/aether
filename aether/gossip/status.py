@@ -18,13 +18,36 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any
 
+from aether.network.node import NodeAddress
+
 if TYPE_CHECKING:
     from aether.gossip.bootstrap import BootstrapServer
     from aether.gossip.broker import GossipBroker
     from aether.network.publisher import NetworkPublisher
     from aether.network.subscriber import NetworkSubscriber
+    from aether.snapshot import BrokerSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_snapshot(snapshot: BrokerSnapshot) -> dict:
+    """Serialize a BrokerSnapshot to a JSON-safe dict.
+
+    NodeAddress → "host:port" string, PayloadRange → {"low": n, "high": n}.
+    The orchestrator only needs `timestamp` for the Path A/B decision, but we
+    serialize the full snapshot so callers have the option to inspect state.
+    """
+    return {
+        "snapshot_id": snapshot.snapshot_id,
+        "broker_address": str(snapshot.broker_address),
+        "peer_brokers": [str(p) for p in snapshot.peer_brokers],
+        "remote_subscribers": {
+            str(addr): [{"low": int(pr.low), "high": int(pr.high)} for pr in ranges]
+            for addr, ranges in snapshot.remote_subscribers.items()
+        },
+        "seen_message_ids": list(snapshot.seen_message_ids),
+        "timestamp": snapshot.timestamp,
+    }
 
 
 class _StatusHandler(BaseHTTPRequestHandler):
@@ -40,6 +63,14 @@ class _StatusHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/status":
             self._handle_status()
+        elif self.path.startswith("/snapshots/"):
+            self._handle_get_snapshot()
+        else:
+            self._send_json({"error": "not found"}, status=404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/recover":
+            self._handle_recover()
         else:
             self._send_json({"error": "not found"}, status=404)
 
@@ -76,6 +107,63 @@ class _StatusHandler(BaseHTTPRequestHandler):
         }
 
         self._send_json(payload, status=200)
+
+    # ------------------------------------------------------------------ #
+    # /recover implementation                                              #
+    # ------------------------------------------------------------------ #
+
+    def _handle_recover(self) -> None:
+        # Parse JSON body — RecoveryManager sends {"dead_broker_host": ..., "dead_broker_port": ...}
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            dead_host = body["dead_broker_host"]
+            dead_port = int(body["dead_broker_port"])
+        except (KeyError, ValueError, json.JSONDecodeError):
+            self._send_json({"error": "invalid request body"}, status=400)
+            return
+
+        dead = NodeAddress(dead_host, dead_port)
+
+        try:
+            snapshot = self.broker.request_snapshot_from_peers(dead, timeout=5.0)
+            if snapshot is None:
+                self._send_json({"error": "no_snapshot_available"}, status=500)
+                return
+            self.broker.recover_from_snapshot(snapshot)
+        except Exception as exc:
+            logger.error("recovery failed for %s: %s", dead, exc, exc_info=True)
+            self._send_json({"error": "recovery_failed"}, status=500)
+            return
+
+        self._send_json({"status": "recovered"}, status=200)
+
+    # ------------------------------------------------------------------ #
+    # /snapshots/{host}/{port} implementation                              #
+    # ------------------------------------------------------------------ #
+
+    def _handle_get_snapshot(self) -> None:
+        # Path: /snapshots/{host}/{port}
+        parts = self.path.strip("/").split("/")
+        if len(parts) != 3 or parts[0] != "snapshots":
+            self._send_json({"error": "invalid path"}, status=400)
+            return
+
+        try:
+            host, port = parts[1], int(parts[2])
+        except ValueError:
+            self._send_json({"error": "invalid port"}, status=400)
+            return
+
+        addr = NodeAddress(host, port)
+        with self.broker._lock:
+            snapshot = self.broker._peer_snapshots.get(addr)
+
+        if snapshot is None:
+            self._send_json({"error": "snapshot not found"}, status=404)
+            return
+
+        self._send_json(_serialize_snapshot(snapshot), status=200)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -155,6 +243,28 @@ class _BootstrapStatusHandler(BaseHTTPRequestHandler):
             self._handle_status()
         else:
             self._send_json({"error": "not found"}, status=404)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if self.path == "/deregister":
+            self._handle_deregister()
+        else:
+            self._send_json({"error": "not found"}, status=404)
+
+    def _handle_deregister(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            host = body["host"]
+            port = int(body["port"])
+        except (KeyError, ValueError, json.JSONDecodeError):
+            self._send_json({"error": "invalid request body"}, status=400)
+            return
+
+        addr = NodeAddress(host, port)
+        with self.bootstrap._lock:
+            self.bootstrap.registered_brokers.discard(addr)
+
+        self._send_json({"status": "deregistered"}, status=200)
 
     def _handle_status(self) -> None:
         bs = self.bootstrap

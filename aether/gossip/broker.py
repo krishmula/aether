@@ -25,6 +25,8 @@ from aether.network.node import NetworkNode, NodeAddress
 from aether.snapshot import (
     BrokerRecoveryNotification,
     BrokerSnapshot,
+    Ping,
+    Pong,
     SnapshotMarker,
     SnapshotReplica,
     SnapshotRequest,
@@ -779,6 +781,11 @@ class GossipBroker:
                 elif isinstance(msg, SnapshotResponse):
                     if sender is not None:
                         self._handle_snapshot_response(msg, sender)
+                elif isinstance(msg, Ping):
+                    if sender is not None:
+                        self.network.send(
+                            Pong(sender=self.address, sequence=msg.sequence), sender
+                        )
                 elif isinstance(msg, Message):
                     msg_id = str(uuid.uuid4())
                     gossip_msg = GossipMessage(

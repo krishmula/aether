@@ -11,6 +11,9 @@ from aether.utils.log import BoundLogger
 
 logger = logging.getLogger(__name__)
 
+# How long to skip a broker after a send failure (seconds).
+_DEAD_BROKER_COOLDOWN = 30.0
+
 
 class NetworkPublisher:
     def __init__(
@@ -27,6 +30,8 @@ class NetworkPublisher:
         self.total_sent = 0
         self._start_time: float = time.time()
         self._status_port: Optional[int] = None
+        # broker_address → time.time() when it last failed
+        self._dead_brokers: dict[NodeAddress, float] = {}
 
     def publish(self, msg: Message, redundancy: int = 2) -> int:
         """Publish a message to multiple brokers for redundancy.
@@ -35,10 +40,26 @@ class NetworkPublisher:
         brokers can deduplicate the message even when received from
         multiple sources.
 
+        Brokers that recently failed are skipped for _DEAD_BROKER_COOLDOWN
+        seconds. After the cooldown a failed broker is retried automatically;
+        a successful send clears it from the dead list.
+
         Returns the number of brokers the message was successfully sent to.
         """
-        num_targets = min(redundancy, len(self.broker_addresses))
-        targets = random.sample(self.broker_addresses, num_targets)
+        now = time.time()
+
+        # Partition into live (cooldown expired or never failed) vs cooling-down.
+        live_brokers = [
+            addr for addr in self.broker_addresses
+            if now - self._dead_brokers.get(addr, 0) >= _DEAD_BROKER_COOLDOWN
+        ]
+
+        num_targets = min(redundancy, len(live_brokers))
+        if num_targets == 0:
+            self.log.warning("all brokers in cooldown — dropping message")
+            return 0
+
+        targets = random.sample(live_brokers, num_targets)
 
         msg_id = str(uuid.uuid4())
         gossip_msg = GossipMessage(
@@ -53,6 +74,7 @@ class NetworkPublisher:
             try:
                 self.network.send(gossip_msg, broker_addr)
                 self.total_sent += 1
+                self._dead_brokers.pop(broker_addr, None)  # clear on success
                 self.log.debug(
                     "published payload=%d msg_id=%s -> %s",
                     msg.payload,
@@ -61,10 +83,12 @@ class NetworkPublisher:
                 )
                 sent_count += 1
             except Exception:
+                self._dead_brokers[broker_addr] = time.time()
                 self.log.error(
-                    "failed to send msg_id=%s to %s",
+                    "failed to send msg_id=%s to %s — broker marked dead for %.0fs",
                     msg_id[:8],
                     broker_addr,
+                    _DEAD_BROKER_COOLDOWN,
                     exc_info=True,
                 )
 

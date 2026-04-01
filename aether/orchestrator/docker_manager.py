@@ -216,7 +216,10 @@ class DockerManager:
             name=container_name,
             hostname=hostname,
             network=settings.docker_network,
-            environment={"AETHER_CONFIG": "/app/config.docker.yaml"},
+            environment={
+                "AETHER_CONFIG": "/app/config.docker.yaml",
+                "AETHER_ORCHESTRATOR_URL": settings.orchestrator_url,
+            },
             detach=True,
             ports={
                 f"{internal_port}/tcp": host_port,
