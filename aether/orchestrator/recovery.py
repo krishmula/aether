@@ -16,14 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 class RecoveryManager:
-
     def __init__(self, docker_mgr, broadcaster, settings) -> None:
         self._docker_mgr = docker_mgr
         self._broadcaster = broadcaster
         self._settings = settings
-        self._recent_recoveries: dict[int, float] = (
-            {}
-        )  # broker_id → timestamp (debounce)
+        self._recent_recoveries: dict[
+            int, float
+        ] = {}  # broker_id → timestamp (debounce)
         self._lock = asyncio.Lock()
 
     async def handle_broker_dead(self, broker_id: int, host: str, port: int) -> None:
@@ -82,8 +81,12 @@ class RecoveryManager:
 
                 await self._recover_redistribution(broker_id)
 
-            except Exception:
+            except Exception as e:
                 logger.exception("Recovery failed for broker %d", broker_id)
+                await self._broadcaster.emit(
+                    EventType.BROKER_RECOVERY_FAILED,
+                    {"broker_id": broker_id, "reason": str(e)},
+                )
 
     async def _fetch_best_snapshot(
         self,
@@ -232,8 +235,8 @@ class RecoveryManager:
                 len(orphaned_subscribers),
             )
             await self._broadcaster.emit(
-                EventType.BROKER_RECOVERED,
-                {"broker_id": broker_id, "recovery_path": "failed"},
+                EventType.BROKER_RECOVERY_FAILED,
+                {"broker_id": broker_id, "reason": "no_surviving_brokers"},
             )
             return
 

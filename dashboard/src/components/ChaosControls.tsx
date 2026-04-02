@@ -1,10 +1,12 @@
 import { useAetherStore } from "../store/useAetherStore";
 import * as api from "../api/client";
+import { useState } from "react";
 
 export default function ChaosControls() {
   const systemState = useAetherStore((s) => s.systemState);
   const chaosState = useAetherStore((s) => s.chaosState);
   const setChaosState = useAetherStore((s) => s.setChaosState);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   const runningBrokers = (systemState?.brokers ?? []).filter(
     (b) => b.status === "running",
@@ -12,6 +14,7 @@ export default function ChaosControls() {
   const canChaos = runningBrokers.length >= 2 && !chaosState?.active;
 
   const handleChaos = async () => {
+    setApiError(null);
     try {
       const res = await api.createChaos();
       setChaosState({
@@ -21,6 +24,8 @@ export default function ChaosControls() {
         recoveryPath: null,
       });
     } catch (e) {
+      const message = e instanceof Error ? e.message : "Unknown error occurred";
+      setApiError(message);
       console.error("Failed to create chaos:", e);
     }
   };
@@ -50,6 +55,12 @@ export default function ChaosControls() {
         </button>
       </div>
 
+      {apiError && (
+        <div className="mt-2 text-[10px] font-mono text-error">
+          Failed: {apiError}
+        </div>
+      )}
+
       {chaosState && (
         <div className="mt-2 space-y-1">
           <div className="flex items-center gap-1.5">
@@ -57,9 +68,11 @@ export default function ChaosControls() {
               className={`w-1.5 h-1.5 rounded-full ${
                 chaosState.phase === "recovered"
                   ? "bg-publisher"
-                  : chaosState.phase === "recovering"
-                    ? "bg-starting animate-pulse"
-                    : "bg-error animate-pulse"
+                  : chaosState.phase === "failed"
+                    ? "bg-error animate-pulse"
+                    : chaosState.phase === "recovering"
+                      ? "bg-starting animate-pulse"
+                      : "bg-error animate-pulse"
               }`}
             />
             <span className="text-[10px] font-mono text-secondary">
@@ -67,6 +80,7 @@ export default function ChaosControls() {
               {chaosState.phase === "declared_dead" && `B${chaosState.targetBrokerId} declared dead`}
               {chaosState.phase === "recovering" && `Recovering B${chaosState.targetBrokerId}`}
               {chaosState.phase === "recovered" && `B${chaosState.targetBrokerId} recovered`}
+              {chaosState.phase === "failed" && `Recovery failed for B${chaosState.targetBrokerId}`}
             </span>
           </div>
 

@@ -44,9 +44,9 @@ _DOCKER_TO_COMPONENT_STATUS: dict[str, ComponentStatus] = {
 class DockerManager:
     def __init__(self) -> None:
         self.client = docker.from_env()
-        self._components: dict[
-            str, ComponentInfo
-        ] = {}  # container_name -> ComponentInfo
+        self._components: dict[str, ComponentInfo] = (
+            {}
+        )  # container_name -> ComponentInfo
         self._ensure_network()
 
     def _ensure_network(self) -> None:
@@ -129,15 +129,15 @@ class DockerManager:
         monitor (or the chaos endpoint directly) will detect the failure and
         trigger the recovery pipeline.
         """
-        info = self._get_component(ComponentType.BROKER, broker_id)
-        container = self.client.containers.get(info.container_id)
+        kill_container_info = self._get_component(ComponentType.BROKER, broker_id)
+        container = self.client.containers.get(kill_container_info.container_id)
         container.kill()
         logger.warning(
             "Force-killed broker %d (container %s) — simulating crash",
             broker_id,
-            info.container_id[:12],
+            kill_container_info.container_id[:12],
         )
-        return info
+        return kill_container_info
 
     # --- Publisher Lifecycle ---
 

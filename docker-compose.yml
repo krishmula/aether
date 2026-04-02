@@ -46,7 +46,7 @@ services:
     image: aether:latest
     container_name: aether-orchestrator
     hostname: orchestrator
-    command: uvicorn aether.orchestrator.main:app --host 0.0.0.0 --port 9000
+    command: uvicorn aether.orchestrator.main:app --host 0.0.0.0 --port 9000 --log-level info
     ports:
       - "9000:9000"   # FastAPI control plane
     volumes:

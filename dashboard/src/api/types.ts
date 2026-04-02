@@ -15,6 +15,7 @@ export type EventType =
   | "broker_declared_dead"
   | "broker_recovery_started"
   | "broker_recovered"
+  | "broker_recovery_failed"
   | "subscriber_reconnected"
   | "message_published"
   | "message_delivered"

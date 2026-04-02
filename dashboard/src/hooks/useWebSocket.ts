@@ -13,6 +13,7 @@ const STRUCTURAL_EVENTS: Set<EventType> = new Set([
   "broker_declared_dead",
   "broker_recovery_started",
   "broker_recovered",
+  "broker_recovery_failed",
   "subscriber_reconnected",
 ]);
 
@@ -59,6 +60,9 @@ export function useWebSocket() {
           } else if (event.type === "broker_recovered") {
             setChaosPhase("recovered");
             setTimeout(clearChaosState, 3000);
+          } else if (event.type === "broker_recovery_failed") {
+            setChaosPhase("failed");
+            setTimeout(clearChaosState, 8000);
           }
 
           if (STRUCTURAL_EVENTS.has(event.type)) {

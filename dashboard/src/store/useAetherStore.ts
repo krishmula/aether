@@ -12,7 +12,7 @@ const MAX_EVENTS = 200;
 export interface ChaosState {
   active: boolean;
   targetBrokerId: number | null;
-  phase: "triggered" | "declared_dead" | "recovering" | "recovered";
+  phase: "triggered" | "declared_dead" | "recovering" | "recovered" | "failed";
   recoveryPath: "replacement" | "redistribution" | null;
 }
 

@@ -33,6 +33,10 @@ from .models import (
 from .recovery import RecoveryManager
 from .settings import settings
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Aether Control Plane")

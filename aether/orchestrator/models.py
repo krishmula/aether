@@ -39,6 +39,7 @@ class EventType(StrEnum):
     BROKER_DECLARED_DEAD = "broker_declared_dead"
     BROKER_RECOVERY_STARTED = "broker_recovery_started"
     BROKER_RECOVERED = "broker_recovered"
+    BROKER_RECOVERY_FAILED = "broker_recovery_failed"
     SUBSCRIBER_RECONNECTED = "subscriber_reconnected"
 
     # System events (from log tailing)
