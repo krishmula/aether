@@ -283,3 +283,75 @@ class RecoveryManager:
                 "affected_subscribers": len(orphaned_subscribers),
             },
         )
+
+    async def reassign_orphans(self, broker_id: int) -> int:
+        """Reassign subscribers orphaned by an intentional broker deletion.
+
+        Called after the broker container has already been removed. Finds all
+        subscribers that were assigned to ``broker_id``, then distributes them
+        across surviving running brokers using a least-loaded strategy.
+
+        Returns the number of subscribers reassigned.
+        """
+        orphaned_subscribers = [
+            info
+            for info in self._docker_mgr._components.values()
+            if info.component_type == ComponentType.SUBSCRIBER
+            and info.broker_id == broker_id
+        ]
+
+        if not orphaned_subscribers:
+            return 0
+
+        surviving_brokers = [
+            info
+            for info in self._docker_mgr._components.values()
+            if info.component_type == ComponentType.BROKER
+            and info.status == ComponentStatus.RUNNING
+            and info.component_id != broker_id
+        ]
+
+        if not surviving_brokers:
+            logger.warning(
+                "No surviving brokers — %d subscribers remain orphaned",
+                len(orphaned_subscribers),
+            )
+            return 0
+
+        subscriber_counts: dict[int, int] = {
+            b.component_id: 0 for b in surviving_brokers
+        }
+        for info in self._docker_mgr._components.values():
+            if (
+                info.component_type == ComponentType.SUBSCRIBER
+                and info.broker_id in subscriber_counts
+            ):
+                subscriber_counts[info.broker_id] += 1
+
+        for subscriber in orphaned_subscribers:
+            least_loaded_id = min(subscriber_counts, key=subscriber_counts.get)
+            old_broker_id = subscriber.broker_id
+            subscriber.broker_id = least_loaded_id
+            subscriber_counts[least_loaded_id] += 1
+
+            logger.info(
+                "Reassigned subscriber %d: broker %d → broker %d",
+                subscriber.component_id,
+                old_broker_id,
+                least_loaded_id,
+            )
+            await self._broadcaster.emit(
+                EventType.SUBSCRIBER_RECONNECTED,
+                {
+                    "subscriber_id": subscriber.component_id,
+                    "old_broker_id": old_broker_id,
+                    "new_broker_id": least_loaded_id,
+                },
+            )
+
+        logger.info(
+            "Broker %d intentional delete — %d subscribers reassigned",
+            broker_id,
+            len(orphaned_subscribers),
+        )
+        return len(orphaned_subscribers)

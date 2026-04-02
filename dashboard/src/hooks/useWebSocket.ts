@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useAetherStore } from "../store/useAetherStore";
 import type { WebSocketEvent, EventType } from "../api/types";
 
+
 const STRUCTURAL_EVENTS: Set<EventType> = new Set([
   "broker_added",
   "broker_removed",
@@ -9,6 +10,10 @@ const STRUCTURAL_EVENTS: Set<EventType> = new Set([
   "publisher_removed",
   "subscriber_added",
   "subscriber_removed",
+  "broker_declared_dead",
+  "broker_recovery_started",
+  "broker_recovered",
+  "subscriber_reconnected",
 ]);
 
 const MAX_BACKOFF = 10_000;
@@ -21,6 +26,8 @@ export function useWebSocket() {
   const setWsConnected = useAetherStore((s) => s.setWsConnected);
   const refreshAll = useAetherStore((s) => s.refreshAll);
   const fetchState = useAetherStore((s) => s.fetchState);
+  const setChaosPhase = useAetherStore((s) => s.setChaosPhase);
+  const clearChaosState = useAetherStore((s) => s.clearChaosState);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,6 +50,16 @@ export function useWebSocket() {
         try {
           const event: WebSocketEvent = JSON.parse(msg.data);
           addEvent(event);
+
+          if (event.type === "broker_declared_dead") {
+            setChaosPhase("declared_dead");
+          } else if (event.type === "broker_recovery_started") {
+            const path = event.data.recovery_path as "replacement" | "redistribution" | undefined;
+            setChaosPhase("recovering", { recoveryPath: path ?? null });
+          } else if (event.type === "broker_recovered") {
+            setChaosPhase("recovered");
+            setTimeout(clearChaosState, 3000);
+          }
 
           if (STRUCTURAL_EVENTS.has(event.type)) {
             refreshAll();
@@ -76,5 +93,5 @@ export function useWebSocket() {
       clearTimeout(timeout);
       wsRef.current?.close();
     };
-  }, [addEvent, setWsConnected, refreshAll, fetchState]);
+  }, [addEvent, setWsConnected, refreshAll, fetchState, setChaosPhase, clearChaosState]);
 }

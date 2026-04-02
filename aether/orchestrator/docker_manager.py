@@ -121,6 +121,24 @@ class DockerManager:
         )
         return remove_container_info
 
+    def force_kill_broker(self, broker_id: int) -> ComponentInfo:
+        """SIGKILL a broker container without removing it from tracking.
+
+        Simulates an unplanned crash: the container dies but the orchestrator's
+        _components entry stays intact and status remains RUNNING. The health
+        monitor (or the chaos endpoint directly) will detect the failure and
+        trigger the recovery pipeline.
+        """
+        info = self._get_component(ComponentType.BROKER, broker_id)
+        container = self.client.containers.get(info.container_id)
+        container.kill()
+        logger.warning(
+            "Force-killed broker %d (container %s) — simulating crash",
+            broker_id,
+            info.container_id[:12],
+        )
+        return info
+
     # --- Publisher Lifecycle ---
 
     def create_publisher(self, req: CreatePublisherRequest) -> ComponentInfo:

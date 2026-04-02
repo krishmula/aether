@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 
 import docker.errors
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -72,7 +73,7 @@ async def add_broker(
 
 @app.delete("/api/brokers/{broker_id}", response_model=ComponentResponse)
 async def remove_broker(broker_id: int) -> ComponentResponse:
-    """Stop and remove a broker container."""
+    """Stop and remove a broker container, then reassign its subscribers."""
     try:
         info = docker_mgr.remove_broker(broker_id)
     except ValueError as exc:
@@ -80,6 +81,7 @@ async def remove_broker(broker_id: int) -> ComponentResponse:
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     await broadcaster.emit(EventType.BROKER_REMOVED, info.model_dump(mode="json"))
+    await recovery_mgr.reassign_orphans(broker_id)
     return ComponentResponse(action="removed", component=info)
 
 
@@ -247,6 +249,47 @@ async def seed_demo() -> dict:
         "seeded": len(created),
         "components": [c.model_dump(mode="json") for c in created],
     }
+
+
+# ---------------------------------------------------------------------------
+# Chaos
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/chaos")
+async def create_chaos() -> dict:
+    """Force-kill a random running broker to simulate an unplanned crash.
+
+    Picks a random running broker (requires at least 2), SIGKILLs its
+    container, then immediately triggers the recovery pipeline — bypassing the
+    health monitor's polling delay while producing identical recovery behavior.
+    """
+    running_brokers = [
+        info
+        for info in docker_mgr._components.values()
+        if info.component_type == ComponentType.BROKER
+        and info.status == ComponentStatus.RUNNING
+    ]
+    if len(running_brokers) < 2:
+        raise HTTPException(
+            status_code=409,
+            detail="Need at least 2 running brokers to create chaos",
+        )
+
+    target = random.choice(running_brokers)
+    try:
+        docker_mgr.force_kill_broker(target.component_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    asyncio.create_task(
+        recovery_mgr.handle_broker_dead(
+            target.component_id,
+            target.hostname,
+            target.internal_port,
+        )
+    )
+    return {"chaos_target": target.component_id}
 
 
 # ---------------------------------------------------------------------------

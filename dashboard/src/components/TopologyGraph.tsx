@@ -40,7 +40,8 @@ function AnimatedEdge({
 }) {
   const src = edge.source as PositionedNode;
   const tgt = edge.target as PositionedNode;
-  if (!src.x || !tgt.x) return null;
+  if (typeof src === "string" || typeof tgt === "string") return null;
+  if (src.x == null || tgt.x == null) return null;
 
   const color = EDGE_COLORS[edge.edge_type as keyof typeof EDGE_COLORS] ?? "#555";
   const cfg = PARTICLE_CONFIG[edge.edge_type] ?? PARTICLE_CONFIG.peer;
@@ -159,6 +160,7 @@ function AnimatedEdge({
 
 export default function TopologyGraph() {
   const topology = useAetherStore((s) => s.topology);
+  const chaosState = useAetherStore((s) => s.chaosState);
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
@@ -379,6 +381,33 @@ export default function TopologyGraph() {
                       repeatCount="indefinite"
                     />
                   </circle>
+                )}
+
+                {/* Chaos rings — only on the targeted broker */}
+                {chaosState?.targetBrokerId === node.component_id && (
+                  <>
+                    {/* triggered / declared_dead: fast orange-red pulse */}
+                    {(chaosState.phase === "triggered" || chaosState.phase === "declared_dead") && (
+                      <circle r={r + 3} fill="none" stroke="#ff5500" strokeWidth={2.5} opacity={0.9}>
+                        <animate attributeName="opacity" values="0.3;1.0;0.3" dur="0.8s" repeatCount="indefinite" />
+                        <animate attributeName="r" values={`${r + 2};${r + 8};${r + 2}`} dur="0.8s" repeatCount="indefinite" />
+                      </circle>
+                    )}
+                    {/* recovering: calm amber pulse */}
+                    {chaosState.phase === "recovering" && (
+                      <circle r={r + 3} fill="none" stroke="#f59e0b" strokeWidth={2} opacity={0.7}>
+                        <animate attributeName="opacity" values="0.3;0.8;0.3" dur="1.2s" repeatCount="indefinite" />
+                        <animate attributeName="r" values={`${r + 2};${r + 7};${r + 2}`} dur="1.2s" repeatCount="indefinite" />
+                      </circle>
+                    )}
+                    {/* recovered: green ring that fades out */}
+                    {chaosState.phase === "recovered" && (
+                      <circle r={r + 3} fill="none" stroke="#22c55e" strokeWidth={2} opacity={0.8}>
+                        <animate attributeName="opacity" values="0.8;0.0" dur="3s" fill="freeze" />
+                        <animate attributeName="r" values={`${r + 3};${r + 12}`} dur="3s" fill="freeze" />
+                      </circle>
+                    )}
+                  </>
                 )}
 
                 {/* Label */}

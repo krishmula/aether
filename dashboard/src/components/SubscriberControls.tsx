@@ -126,7 +126,7 @@ export default function SubscriberControls({ subscribers, brokers }: Props) {
                 <StatusBadge status={s.status} />
                 <span className="font-mono text-primary">S{s.component_id}</span>
                 <span className="text-muted font-mono text-[10px]">
-                  B{s.broker_id} · {s.range_low}–{s.range_high}
+                  {s.broker_id != null ? `B${s.broker_id}` : "unassigned"} · {s.range_low}–{s.range_high}
                 </span>
               </div>
               <button

@@ -1,7 +1,7 @@
 # Makefile for aether distributed messaging system
 # Targets documented in docs/instructions.md and docs/roadmap.md
 
-.PHONY: demo status logs clean build build-dashboard test lint up down restart ps check-ports
+.PHONY: demo status logs clean build build-dashboard test lint up down restart ps check-ports purge-network
 
 # Colors for better output
 GREEN = \033[0;32m
@@ -40,7 +40,7 @@ help:
 	@echo ""
 	@echo "See docs/instructions.md for detailed usage"
 
-demo: build check-ports
+demo: build check-ports purge-network
 	@echo "$(YELLOW)Starting bootstrap + orchestrator...$(NC)"
 	@docker-compose up -d
 	@echo "$(YELLOW)Waiting for orchestrator to be ready$(NC)"
@@ -71,6 +71,16 @@ clean:
 	-@docker ps -aq --filter "label=component_type" | xargs -r docker rm -f
 	@echo "$(YELLOW)Stopping compose-managed services (bootstrap + orchestrator)...$(NC)"
 	@docker-compose down -v --remove-orphans
+	$(MAKE) purge-network
+
+purge-network:
+	@if docker network inspect aether-net >/dev/null 2>&1; then \
+		label=$$(docker network inspect aether-net --format '{{index .Labels "com.docker.compose.network"}}' 2>/dev/null); \
+		if [ "$$label" != "aether-net" ]; then \
+			echo "$(YELLOW)Removing stale aether-net network (missing compose labels)...$(NC)"; \
+			docker network rm aether-net >/dev/null 2>&1 || true; \
+		fi \
+	fi
 
 build:
 	@echo "$(YELLOW)Building Docker images...$(NC)"

@@ -60,7 +60,11 @@ export function useForceSimulation(
       };
     });
 
-    const simEdges: PositionedEdge[] = edges.map((e) => ({
+    // Filter out edges referencing deleted nodes — D3 forceLink throws on missing IDs.
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const validEdges = edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
+
+    const simEdges: PositionedEdge[] = validEdges.map((e) => ({
       source: e.source,
       target: e.target,
       edge_type: e.edge_type,

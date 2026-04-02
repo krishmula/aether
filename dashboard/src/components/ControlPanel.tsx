@@ -2,6 +2,7 @@ import { useAetherStore } from "../store/useAetherStore";
 import BrokerControls from "./BrokerControls";
 import PublisherControls from "./PublisherControls";
 import SubscriberControls from "./SubscriberControls";
+import ChaosControls from "./ChaosControls";
 
 export default function ControlPanel() {
   const systemState = useAetherStore((s) => s.systemState);
@@ -18,6 +19,8 @@ export default function ControlPanel() {
           subscribers={systemState?.subscribers ?? []}
           brokers={systemState?.brokers ?? []}
         />
+        <hr className="border-border" />
+        <ChaosControls />
       </div>
     </aside>
   );

@@ -4,11 +4,13 @@ Aether is a distributed pub-sub broker with Chandy-Lamport snapshot recovery —
 
 Built from TCP sockets up: gossip-based message propagation across a broker mesh, consistent global snapshots for fault-tolerant state capture, automatic broker failover with two recovery paths, and a FastAPI orchestration control plane that manages Docker containers on the fly — all with a live React dashboard.
 
-```
-Publisher ──→ Broker ←─ gossip ─→ Broker ──→ Subscriber
-                │                    │
-                └──── Chandy-Lamport snapshot ────┘
-                         (replicated to k peers)
+```mermaid
+flowchart LR
+    P[Publisher] --> B1[Broker]
+    B1 <--> B2[Broker]
+    B2 --> S[Subscriber]
+    B1 -. SnapshotMarker .-> B2
+    B2 -. Snapshot replica k=2 .-> B1
 ```
 
 **No external message queue. No Kafka. No Redis. Built from TCP sockets up.**
@@ -29,38 +31,32 @@ Publisher ──→ Broker ←─ gossip ─→ Broker ──→ Subscriber
 
 ## How Failover Works
 
-```
-                DETECTION                     DECISION                      EXECUTION
-          ┌──────────────────┐         ┌─────────────────────┐       ┌─────────────────────┐
-          │                  │         │                     │       │                     │
-Orch.     │  Poll broker     │ Broker  │  Query peers for    │ Fresh │  Replacement Path   │
-Health    │  /status every   │ declared│  dead broker's      │ snap? │  - Spin up new      │
-Monitor   │  5s. 3 consec.   ├─dead──► │  snapshot replicas  ├─YES─► │    broker (same ID) │
-          │  failures = dead │         │  Check vs 30s       │       │  - POST /recover    │
-          │                  │         │  threshold          │       │  - Restore full     │
-          └──────────────────┘         └─────────┬───────────┘       │    state from snap  │
-                                                 │                   └─────────────────────┘
-          ┌──────────────────┐                   │ NO
-          │                  │                   ▼                   ┌─────────────────────┐
-Subscriber│  Ping broker     │                                       │                     │
-Health    │  every 5s.       │                                       │  Redistribution     │
-Check     │  No pong for     │                                       │  - Find orphaned    │
-          │  15s = enter     │                                       │    subscribers      │
-          │  reconnect loop  │                                       │  - Assign to least- │
-          └───────┬──────────┘                                       │    loaded broker    │
-                  │ reconnect                                        └─────────────────────┘
-                  ▼
-          ┌──────────────────┐
-          │  GET /api/       │
-          │  assignment?     │  ← orchestrator is the single
-          │  subscriber_id=X │    source of truth for
-          │                  │    subscriber→broker mapping
-          │  Exponential     │
-          │  backoff + jitter│
-          └──────────────────┘
+```mermaid
+sequenceDiagram
+    participant HM as HealthMonitor
+    participant RM as RecoveryManager
+    participant Peers as Surviving brokers
+    participant NB as Replacement broker
+    participant Sub as Subscriber
+
+    HM->>RM: 3 failed /status polls (5s interval)
+    RM->>Peers: GET /snapshots/{host}/{port}
+    Peers-->>RM: freshest snapshot or 404
+
+    alt Fresh snapshot (< 30s)
+        RM->>NB: create broker with same broker_id
+        RM->>NB: POST /recover
+        NB->>Peers: SnapshotRequest over broker mesh
+        Peers-->>NB: SnapshotResponse
+        NB-->>Sub: BrokerRecoveryNotification
+    else Missing or stale snapshot
+        RM->>RM: reassign subscriber.broker_id
+        Sub->>RM: GET /api/assignment?subscriber_id=N
+        RM-->>Sub: broker_host + broker_port
+    end
 ```
 
-**Path A (Replacement):** When a snapshot was taken within the last 30 seconds, Aether spins up a new broker on the same address, calls `POST /recover`, and restores the dead broker's full state — subscriber registrations, message dedup history, and peer list. Subscribers are transparently redirected. Nothing is lost except messages in-flight at the moment of failure.
+**Path A (Replacement):** When a snapshot was taken within the last 30 seconds, Aether spins up a new broker with the same broker ID, calls `POST /recover`, and restores the dead broker's subscriber registrations, dedup history, and peer list. The replacement broker then pushes `BrokerRecoveryNotification` to known subscribers, while the pull-based assignment API remains the fallback path.
 
 **Path B (Redistribution):** When no fresh snapshot is available, Aether reassigns orphaned subscribers to the surviving broker with the fewest current subscribers. Subscribers reconnect via the same pull-based assignment API. Message history is not restored, but the system stays live.
 
@@ -217,50 +213,71 @@ brokers:
 ```bash
 export AETHER_CONFIG=/path/to/config.yaml
 aether-bootstrap --host 100.x.x.10 --port 7000 --status-port 17000
-aether-broker    --host 100.x.x.34 --port 8000 --status-port 18000 --id 1
+aether-broker    --host 100.x.x.34 --port 8000 --status-port 18000 --broker-id 1
 ```
 
 ---
 
 ## Architecture
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Publisher  │     │  Publisher  │     │  Publisher  │
-└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-       │                   │                   │
-       ▼                   ▼                   ▼
-┌─────────────┐◄─gossip──►┌─────────────┐◄─gossip──►┌─────────────┐
-│   Broker 0  │           │   Broker 1  │           │   Broker 2  │
-│  [snapshot] │◄─heartbt─►│  [snapshot] │◄─heartbt─►│  [snapshot] │
-└──────┬──────┘           └──────┬──────┘           └──────┬──────┘
-       │                         │                         │
-       ▼                         ▼                         ▼
-┌───────────┐            ┌───────────┐            ┌───────────┐
-│Subscriber │            │Subscriber │            │Subscriber │
-│ (Ping/♡)  │            │ (Ping/♡)  │            │ (Ping/♡)  │
-└───────────┘            └───────────┘            └───────────┘
+```mermaid
+flowchart TB
+    subgraph ControlPlane[Control plane]
+        Boot[Bootstrap]
+        Orch[Orchestrator]
+        Dash[Dashboard]
+    end
 
-                   ┌─────────────┐
-                   │  Bootstrap  │  (peer discovery)
-                   └─────────────┘
+    subgraph DataPlane[Data plane]
+        P0[Publisher]
+        P1[Publisher]
+        B0[Broker 0]
+        B1[Broker 1]
+        B2[Broker 2]
+        S0[Subscriber]
+        S1[Subscriber]
+        S2[Subscriber]
+    end
 
-                   ┌─────────────────────────┐
-                   │      Orchestrator       │
-                   │  HealthMonitor (asyncio)│
-                   │  RecoveryManager        │
-                   │  GET /api/assignment    │
-                   └─────────────────────────┘
+    Boot -->|membership updates| B0
+    Boot -->|membership updates| B1
+    Boot -->|membership updates| B2
+
+    P0 -->|GossipMessage| B0
+    P1 -->|GossipMessage| B2
+
+    B0 <-->|gossip + heartbeat| B1
+    B1 <-->|gossip + heartbeat| B2
+    B0 -. snapshot replication .-> B1
+    B1 -. snapshot replication .-> B2
+    B2 -. snapshot replication .-> B0
+
+    B0 -->|payload delivery + Pong| S0
+    B1 -->|payload delivery + Pong| S1
+    B2 -->|payload delivery + Pong| S2
+    S0 -->|SubscribeRequest + Ping| B0
+    S1 -->|SubscribeRequest + Ping| B1
+    S2 -->|SubscribeRequest + Ping| B2
+
+    Orch -->|poll /status + trigger recovery| B0
+    Orch -->|poll /status + trigger recovery| B1
+    Orch -->|poll /status + trigger recovery| B2
+    S0 -. assignment lookup on failure .-> Orch
+    S1 -. assignment lookup on failure .-> Orch
+    S2 -. assignment lookup on failure .-> Orch
+    Dash <-->|REST + WebSocket| Orch
 ```
+
+In Docker mode, each component keeps a fixed internal port and gets a unique host port mapping. Brokers listen on container TCP `8000` and status `18000`, publishers on `9000` and `19000`, and subscribers on `9100` and `19100`.
 
 ### Components
 
 | Component | Role | Default Ports |
 |---|---|---|
 | **Bootstrap** | Peer discovery — brokers register here, receive membership updates | TCP `7000`, HTTP `17000` |
-| **Broker** | Message routing, gossip relay, snapshot coordination, Ping/Pong | TCP `8000+`, HTTP `18000+` |
-| **Publisher** | Generates `UInt8` messages, sends to N random brokers with dead-broker cooldown | TCP `9000+` |
-| **Subscriber** | Receives messages matching its `[low, high]` payload range; detects dead broker via Ping | TCP `10000+` |
+| **Broker** | Message routing, gossip relay, snapshot coordination, Ping/Pong | Container TCP `8000`, HTTP `18000` |
+| **Publisher** | Generates `UInt8` messages, sends to N random brokers with dead-broker cooldown | Container TCP `9000`, HTTP `19000` |
+| **Subscriber** | Receives messages matching its `[low, high]` payload range; detects dead broker via Ping | Container TCP `9100`, HTTP `19100` |
 | **Orchestrator** | FastAPI control plane — health monitoring, recovery decisions, assignment registry | HTTP `9000` |
 | **Dashboard** | React + D3 real-time visualization | HTTP `3000` |
 

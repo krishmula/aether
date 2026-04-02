@@ -9,6 +9,13 @@ import * as api from "../api/client";
 
 const MAX_EVENTS = 200;
 
+export interface ChaosState {
+  active: boolean;
+  targetBrokerId: number | null;
+  phase: "triggered" | "declared_dead" | "recovering" | "recovered";
+  recoveryPath: "replacement" | "redistribution" | null;
+}
+
 interface AetherState {
   systemState: SystemState | null;
   topology: TopologyResponse | null;
@@ -16,6 +23,7 @@ interface AetherState {
   events: WebSocketEvent[];
   wsConnected: boolean;
   loading: boolean;
+  chaosState: ChaosState | null;
 
   fetchState: () => Promise<void>;
   fetchTopology: () => Promise<void>;
@@ -24,6 +32,9 @@ interface AetherState {
   addEvent: (event: WebSocketEvent) => void;
   setWsConnected: (connected: boolean) => void;
   setLoading: (loading: boolean) => void;
+  setChaosState: (state: ChaosState) => void;
+  setChaosPhase: (phase: ChaosState["phase"], extra?: Partial<ChaosState>) => void;
+  clearChaosState: () => void;
 }
 
 export const useAetherStore = create<AetherState>((set, get) => ({
@@ -33,6 +44,7 @@ export const useAetherStore = create<AetherState>((set, get) => ({
   events: [],
   wsConnected: false,
   loading: false,
+  chaosState: null,
 
   fetchState: async () => {
     try {
@@ -73,4 +85,15 @@ export const useAetherStore = create<AetherState>((set, get) => ({
 
   setWsConnected: (wsConnected) => set({ wsConnected }),
   setLoading: (loading) => set({ loading }),
+
+  setChaosState: (chaosState) => set({ chaosState }),
+
+  setChaosPhase: (phase, extra) =>
+    set((state) => ({
+      chaosState: state.chaosState
+        ? { ...state.chaosState, ...extra, phase }
+        : null,
+    })),
+
+  clearChaosState: () => set({ chaosState: null }),
 }));

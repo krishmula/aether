@@ -82,3 +82,8 @@ export const seedDemo = () =>
   request<{ seeded: number; components: unknown[] }>("/seed", {
     method: "POST",
   });
+
+// --- Chaos ---
+
+export const createChaos = () =>
+  request<{ chaos_target: number }>("/chaos", { method: "POST" });

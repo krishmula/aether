@@ -6,6 +6,7 @@ import ControlPanel from "./components/ControlPanel";
 import TopologyGraph from "./components/TopologyGraph";
 import MetricsPanel from "./components/MetricsPanel";
 import EventLog from "./components/EventLog";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 export default function App() {
   const refreshAll = useAetherStore((s) => s.refreshAll);
@@ -26,10 +27,18 @@ export default function App() {
   return (
     <div className="h-screen grid grid-rows-[56px_1fr_240px] grid-cols-[280px_1fr] bg-bg">
       <Header />
-      <ControlPanel />
-      <TopologyGraph />
-      <MetricsPanel />
-      <EventLog />
+      <ErrorBoundary>
+        <ControlPanel />
+      </ErrorBoundary>
+      <ErrorBoundary>
+        <TopologyGraph />
+      </ErrorBoundary>
+      <ErrorBoundary>
+        <MetricsPanel />
+      </ErrorBoundary>
+      <ErrorBoundary>
+        <EventLog />
+      </ErrorBoundary>
     </div>
   );
 }
