@@ -308,6 +308,7 @@ class NetworkSubscriber:
                     "reconnected to broker %s after %d attempt(s)",
                     new_broker,
                     attempt + 1,
+                    extra={"event_type": "subscriber_reconnected"},
                 )
 
             except Exception:

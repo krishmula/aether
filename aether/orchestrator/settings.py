@@ -1,5 +1,7 @@
 """Orchestrator configuration — all values sourced from environment variables."""
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 
@@ -9,6 +11,15 @@ class OrchestratorSettings(BaseSettings):
     aether_image: str = "aether:latest"
     docker_network: str = "aether-net"
     orchestrator_url: str = "http://orchestrator:8001"
+
+    # Logging
+    log_level: str = "INFO"
+    # Base URL of the OTel Collector OTLP/HTTP endpoint. When set, the
+    # orchestrator ships its own structured logs to the collector in addition
+    # to stdout. Set via OTEL_ENDPOINT env var in docker-compose.yml.
+    # Dynamic containers (brokers/publishers/subscribers) pick this up from
+    # config.docker.yaml instead — no per-container injection needed.
+    otel_endpoint: Optional[str] = None
 
     # Recovery settings
     snapshot_max_age: float = 30.0

@@ -78,6 +78,8 @@ def main():
         level=args.log_level,
         log_file=args.log_file or config.log_file,
         json_console=config.log_json_console,
+        otel_endpoint=config.log_otel_endpoint,
+        service_name="aether-subscriber",
     )
 
     explicit_broker = args.broker_host is not None and args.broker_port is not None

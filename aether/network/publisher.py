@@ -80,6 +80,7 @@ class NetworkPublisher:
                     msg.payload,
                     msg_id[:8],
                     broker_addr,
+                    extra={"event_type": "message_published"},
                 )
                 sent_count += 1
             except Exception:
@@ -90,6 +91,7 @@ class NetworkPublisher:
                     broker_addr,
                     _DEAD_BROKER_COOLDOWN,
                     exc_info=True,
+                    extra={"event_type": "send_failure", "error_kind": "send_error"},
                 )
 
         return sent_count

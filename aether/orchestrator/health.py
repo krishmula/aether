@@ -18,8 +18,12 @@ from datetime import datetime, timezone
 import httpx
 
 from .models import ComponentInfo, ComponentStatus, ComponentType
+from aether.utils.log import BoundLogger
 
-logger = logging.getLogger(__name__)
+logger = BoundLogger(
+    logging.getLogger(__name__),
+    {"service_name": "aether-orchestrator", "component_type": "orchestrator"},
+)
 
 
 class HealthMonitor:
@@ -91,6 +95,10 @@ class HealthMonitor:
             broker.component_id,
             count,
             self.failure_threshold,
+            extra={
+                "event_type": "broker_poll_failed",
+                "broker_id": str(broker.component_id),
+            },
         )
 
         if count >= self.failure_threshold:
@@ -99,6 +107,10 @@ class HealthMonitor:
                 "broker %d declared dead after %d failures — triggering recovery",
                 broker.component_id,
                 self.failure_threshold,
+                extra={
+                    "event_type": "broker_declared_dead",
+                    "broker_id": str(broker.component_id),
+                },
             )
             asyncio.create_task(
                 self._on_broker_dead(

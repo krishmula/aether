@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import uuid
 
 import httpx
 
@@ -11,8 +12,13 @@ from aether.orchestrator.models import (
     CreateBrokerRequest,
     EventType,
 )
+from aether.orchestrator import metrics
+from aether.utils.log import BoundLogger
 
-logger = logging.getLogger(__name__)
+logger = BoundLogger(
+    logging.getLogger(__name__),
+    {"service_name": "aether-orchestrator", "component_type": "orchestrator"},
+)
 
 
 class RecoveryManager:
@@ -39,6 +45,9 @@ class RecoveryManager:
             )
             return
 
+        recovery_id = str(uuid.uuid4())
+        _t0 = now
+
         async with self._lock:
             try:
                 self._recent_recoveries[broker_id] = now
@@ -46,7 +55,15 @@ class RecoveryManager:
                     EventType.BROKER_DECLARED_DEAD,
                     {"broker_id": broker_id, "host": host, "port": port},
                 )
-                logger.info("Broker %d declared dead — fetching snapshots", broker_id)
+                logger.info(
+                    "broker %d declared dead — fetching snapshots",
+                    broker_id,
+                    extra={
+                        "event_type": "broker_declared_dead",
+                        "broker_id": str(broker_id),
+                        "recovery_id": recovery_id,
+                    },
+                )
 
                 # get surviving brokers (exclude the dead one)
                 alive_brokers = [
@@ -64,25 +81,56 @@ class RecoveryManager:
                     and (now - snapshot["timestamp"]) < self._settings.snapshot_max_age
                 ):
                     logger.info(
-                        "Fresh snapshot found (%.1fs old) — attempting replacement recovery",
+                        "fresh snapshot found (%.1fs old) — attempting replacement recovery",
                         now - snapshot["timestamp"],
                     )
                     try:
-                        await self._recover_replacement(broker_id, host, port, snapshot)
+                        await self._recover_replacement(
+                            broker_id, host, port, snapshot, recovery_id, _t0
+                        )
                         return
                     except Exception:
+                        # Replacement failed — count it as a failure for this path
+                        # before we fall through to redistribution (which gets its
+                        # own counter entry if it succeeds or fails).
+                        metrics.broker_recoveries_total.labels(
+                            recovery_path="replacement", result="failure"
+                        ).inc()
                         logger.exception(
-                            "Replacement recovery failed for broker %d — falling back to redistribution",
+                            "replacement recovery failed for broker %d — falling back to redistribution",
                             broker_id,
+                            extra={
+                                "event_type": "broker_recovery_failed",
+                                "broker_id": str(broker_id),
+                                "recovery_id": recovery_id,
+                                "recovery_path": "replacement",
+                                "error_kind": "replacement_failed",
+                            },
                         )
                 else:
                     reason = "stale" if snapshot else "missing"
-                    logger.info("Snapshot %s — using redistribution recovery", reason)
+                    logger.info("snapshot %s — using redistribution recovery", reason)
 
-                await self._recover_redistribution(broker_id)
+                await self._recover_redistribution(broker_id, recovery_id, _t0)
 
             except Exception as e:
-                logger.exception("Recovery failed for broker %d", broker_id)
+                # Unexpected top-level failure — we don't know which path was
+                # attempted, so label it generically. Still record the duration
+                # so the histogram captures even failed attempts.
+                metrics.broker_recoveries_total.labels(
+                    recovery_path="unknown", result="failure"
+                ).inc()
+                metrics.recovery_duration_seconds.observe(time.time() - _t0)
+                logger.exception(
+                    "recovery failed for broker %d",
+                    broker_id,
+                    extra={
+                        "event_type": "broker_recovery_failed",
+                        "broker_id": str(broker_id),
+                        "recovery_id": recovery_id,
+                        "error_kind": "unexpected_error",
+                    },
+                )
                 await self._broadcaster.emit(
                     EventType.BROKER_RECOVERY_FAILED,
                     {"broker_id": broker_id, "reason": str(e)},
@@ -130,8 +178,20 @@ class RecoveryManager:
         host: str,
         port: int,
         snapshot: dict,
+        recovery_id: str,
+        t0: float,
     ) -> None:
         """Path A: spin up a replacement broker with the same ID and restore from snapshot."""
+        logger.info(
+            "broker %d replacement recovery started",
+            broker_id,
+            extra={
+                "event_type": "broker_recovery_started",
+                "broker_id": str(broker_id),
+                "recovery_id": recovery_id,
+                "recovery_path": "replacement",
+            },
+        )
         await self._broadcaster.emit(
             EventType.BROKER_RECOVERY_STARTED,
             {"broker_id": broker_id, "recovery_path": "replacement"},
@@ -194,14 +254,43 @@ class RecoveryManager:
                     f"POST /recover returned {resp.status_code}: {resp.text}"
                 )
 
-        logger.info("Broker %d replacement recovery complete", broker_id)
+        # Record outcome metrics. The histogram observation captures the full
+        # wall-clock time from when the health monitor fired (t0) to here,
+        # giving us the end-to-end subscriber outage duration for this path.
+        metrics.broker_recoveries_total.labels(
+            recovery_path="replacement", result="success"
+        ).inc()
+        metrics.recovery_duration_seconds.observe(time.time() - t0)
+
+        logger.info(
+            "broker %d replacement recovery complete",
+            broker_id,
+            extra={
+                "event_type": "broker_recovered",
+                "broker_id": str(broker_id),
+                "recovery_id": recovery_id,
+                "recovery_path": "replacement",
+            },
+        )
         await self._broadcaster.emit(
             EventType.BROKER_RECOVERED,
             {"broker_id": broker_id, "recovery_path": "replacement"},
         )
 
-    async def _recover_redistribution(self, broker_id: int) -> None:
+    async def _recover_redistribution(
+        self, broker_id: int, recovery_id: str, t0: float
+    ) -> None:
         """Path B: redistribute orphaned subscribers across surviving brokers."""
+        logger.info(
+            "broker %d redistribution recovery started",
+            broker_id,
+            extra={
+                "event_type": "broker_recovery_started",
+                "broker_id": str(broker_id),
+                "recovery_id": recovery_id,
+                "recovery_path": "redistribution",
+            },
+        )
         await self._broadcaster.emit(
             EventType.BROKER_RECOVERY_STARTED,
             {"broker_id": broker_id, "recovery_path": "redistribution"},
@@ -230,9 +319,21 @@ class RecoveryManager:
             logger.debug("Dead broker %d container already removed", broker_id)
 
         if not surviving_brokers:
+            # Terminal failure — the entire cluster is gone. Count and time it.
+            metrics.broker_recoveries_total.labels(
+                recovery_path="redistribution", result="failure"
+            ).inc()
+            metrics.recovery_duration_seconds.observe(time.time() - t0)
             logger.critical(
-                "No surviving brokers — cannot redistribute %d subscribers",
+                "no surviving brokers — cannot redistribute %d subscribers",
                 len(orphaned_subscribers),
+                extra={
+                    "event_type": "broker_recovery_failed",
+                    "broker_id": str(broker_id),
+                    "recovery_id": recovery_id,
+                    "recovery_path": "redistribution",
+                    "error_kind": "no_surviving_brokers",
+                },
             )
             await self._broadcaster.emit(
                 EventType.BROKER_RECOVERY_FAILED,
@@ -273,10 +374,26 @@ class RecoveryManager:
                 },
             )
 
+        # Redistribution complete — record outcome and how many subscribers
+        # were moved. subscriber_reconnects_total gives operators a running
+        # total of how many times the orchestrator has reassigned subscribers,
+        # useful for tracking churn across the lifetime of a deployment.
+        metrics.broker_recoveries_total.labels(
+            recovery_path="redistribution", result="success"
+        ).inc()
+        metrics.recovery_duration_seconds.observe(time.time() - t0)
+        metrics.subscriber_reconnects_total.inc(len(orphaned_subscribers))
+
         logger.info(
-            "Broker %d redistribution complete — %d subscribers reassigned",
+            "broker %d redistribution complete — %d subscribers reassigned",
             broker_id,
             len(orphaned_subscribers),
+            extra={
+                "event_type": "broker_recovered",
+                "broker_id": str(broker_id),
+                "recovery_id": recovery_id,
+                "recovery_path": "redistribution",
+            },
         )
         await self._broadcaster.emit(
             EventType.BROKER_RECOVERED,

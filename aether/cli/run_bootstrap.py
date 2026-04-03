@@ -41,6 +41,8 @@ def main():
         level=args.log_level,
         log_file=args.log_file or config.log_file,
         json_console=config.log_json_console,
+        otel_endpoint=config.log_otel_endpoint,
+        service_name="aether-bootstrap",
     )
 
     host = args.host or config.bootstrap_host

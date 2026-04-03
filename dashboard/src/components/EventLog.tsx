@@ -16,8 +16,8 @@ const EVENT_COLORS: Partial<Record<EventType, string>> = {
   subscriber_reconnected: "text-subscriber",
   message_published: "text-muted",
   message_delivered: "text-muted",
-  snapshot_initiated: "text-error",
-  snapshot_complete: "text-error",
+  snapshot_initiated: "text-starting",
+  snapshot_complete: "text-starting",
   peer_joined: "text-secondary",
   peer_evicted: "text-secondary",
 };
@@ -56,6 +56,12 @@ function summarize(type: EventType, data: Record<string, unknown>): string {
       return `broker ${data.broker_id ?? data.component_id ?? "?"} recovered (${data.recovery_path ?? "?"})`;
     case "subscriber_reconnected":
       return `subscriber ${data.subscriber_id ?? data.component_id ?? "?"} reconnected`;
+    case "snapshot_initiated":
+      return `snapshot started on broker ${data.broker_id ?? "?"}`;
+    case "snapshot_complete": {
+      const subs = data.subscriber_count != null ? ` · ${data.subscriber_count} subs` : "";
+      return `snapshot saved B${data.broker_id ?? "?"}${subs}`;
+    }
     default:
       return type.replace(/_/g, " ");
   }

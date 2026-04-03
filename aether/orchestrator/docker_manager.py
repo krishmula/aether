@@ -478,3 +478,63 @@ class DockerManager:
         except (URLError, TimeoutError) as exc:
             logger.warning("Failed to fetch status from %s: %s", url, exc)
             return {}
+
+    def _fetch_url(self, url: str) -> dict:
+        """GET an arbitrary URL. Returns {} on failure."""
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                return json.loads(resp.read())
+        except Exception:
+            return {}
+
+    def get_snapshots(self) -> "SnapshotsResponse":
+        """Return per-broker snapshot metadata by querying peer status servers."""
+        import time
+        from .models import BrokerSnapshotInfo, SnapshotsResponse
+
+        brokers = [
+            info for info in self._components.values()
+            if info.component_type == ComponentType.BROKER
+            and info.status == ComponentStatus.RUNNING
+        ]
+        fetched_at = time.time()
+        results: list[BrokerSnapshotInfo] = []
+
+        for target in brokers:
+            best: dict | None = None
+            for querier in brokers:
+                if querier.component_id == target.component_id:
+                    continue
+                url = (
+                    f"http://{querier.hostname}:{querier.internal_status_port}"
+                    f"/snapshots/{target.hostname}/{target.internal_port}"
+                )
+                raw = self._fetch_url(url)
+                if raw and raw.get("timestamp") and (
+                    best is None or raw["timestamp"] > best["timestamp"]
+                ):
+                    best = raw
+
+            own = self._fetch_status(target.hostname, target.internal_status_port)
+            snap_state = own.get("snapshot_state", "idle")
+
+            if best:
+                results.append(BrokerSnapshotInfo(
+                    broker_id=target.component_id,
+                    broker_address=f"{target.hostname}:{target.internal_port}",
+                    snapshot_id=best.get("snapshot_id"),
+                    timestamp=best["timestamp"],
+                    age_seconds=fetched_at - best["timestamp"],
+                    peer_count=len(best.get("peer_brokers", [])),
+                    subscriber_count=len(best.get("remote_subscribers", {})),
+                    seen_message_count=len(best.get("seen_message_ids", [])),
+                    snapshot_state=snap_state,
+                ))
+            else:
+                results.append(BrokerSnapshotInfo(
+                    broker_id=target.component_id,
+                    broker_address=f"{target.hostname}:{target.internal_port}",
+                    snapshot_state=snap_state,
+                ))
+
+        return SnapshotsResponse(brokers=results, fetched_at=fetched_at)

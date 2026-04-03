@@ -19,7 +19,7 @@ Phase 1A: NodeAddress fix (unblocks everything)
 Phase 1B: Core failover infrastructure (HealthMonitor, broker HTTP, RecoveryManager)
 Phase 1C: Subscriber + publisher resilience
 Phase 1D: Tests for Phase 1
-Phase 2:  Observability (OTel + Grafana)
+Phase 2:  Observability (OTel + Loki + Prometheus + Grafana)
 Phase 3:  Demo polish (docker-compose, chaos.sh, README)
 ```
 
@@ -255,69 +255,149 @@ Write all tests before or alongside each feature — not after.
 
 ## Phase 2: Observability Stack
 
-### 12. OTELHandler in QueueListener
+Phase 2 must match the repo as it exists now:
 
-**File:** `aether/utils/log.py`, `aether/config.py`, `pyproject.toml`
-**What:** Add `OTELHandler` class that converts Python `logging.LogRecord` to OpenTelemetry `LogRecord` and exports via `OTLPLogExporter` (gRPC to port 4317). Plug it into the existing `QueueListener` as a third handler (alongside `StreamHandler` and optional `RotatingFileHandler`).
+- brokers, publishers, and subscribers are dynamically created by the orchestrator
+- the repo already has structured JSON logging and async log dispatch
+- the repo already has `/status`, `/api/metrics`, and WebSocket event surfaces
 
-**Why this approach (not replacing existing logging):** Aether already has structured JSON logging with async dispatch via `QueueHandler`/`QueueListener`. Adding `OTELHandler` to the listener requires zero changes to any broker/subscriber/publisher code — they call `logger.info()` exactly as before. The OTel handler just reads the same `LogRecord` objects the stream handler already processes. This is the minimal-diff approach.
+So the observability job is not just "ship logs to Loki." It is to unify logs, metrics, and recovery events into one coherent operational story.
 
-**New config field:** `log_otel_endpoint: Optional[str] = None` in `Config`. When set (e.g., `"http://otel-collector:4317"` in `config.docker.yaml`), `setup_logging()` creates and adds `OTELHandler`. When not set (local development), no OTel dependency is loaded.
+### 12. Standardize structured logging and event logs
+
+**File:** `aether/utils/log.py`, `aether/orchestrator/main.py`, `aether/orchestrator/recovery.py`, `aether/orchestrator/health.py`, `aether/gossip/broker.py`, `aether/network/subscriber.py`, `aether/network/publisher.py`
+
+**What:** Expand the structured logging schema and add explicit lifecycle event logs.
+
+**Required fields to support where relevant:**
+```python
+event_type
+component_type
+component_id
+broker_id
+subscriber_id
+publisher_id
+recovery_id
+snapshot_id
+recovery_path
+error_kind
+msg_id
+```
+
+**Why this is first:** The current logs are structured JSON, but the failover dashboards imagined in the old plan rely on event names that are mostly WebSocket event types, not stable log fields. If Grafana panels depend on free-text message substrings, the observability layer will be fragile from day one.
+
+**Critical:** Move the orchestrator off ad hoc `logging.basicConfig(...)` and onto the same shared logging pipeline. If we only improve the CLI-side logging path, the control plane remains a blind spot.
+
+### 13. Add optional OTLP export to the existing QueueListener path
+
+**File:** `aether/utils/log.py`, `aether/config.py`, `pyproject.toml`, `config.docker.yaml`
+
+**What:** Add an OTLP logging handler as another sink in the existing `QueueListener`, alongside stdout and the optional rotating file handler.
+
+**New config field:**
+```python
+log_otel_endpoint: Optional[str] = None
+```
 
 **Dependencies to add to `pyproject.toml`:**
-```
+```toml
 "opentelemetry-sdk>=1.25.0"
 "opentelemetry-exporter-otlp-proto-grpc>=1.25.0"
 ```
-Use exact versions from PyPI at implementation time. These are stable packages maintained by the CNCF.
 
-### 13. OTel Collector + Loki + Grafana in docker-compose.yml
+**Why this approach:** It preserves the current non-blocking logging design. Application call sites do not change. `logger.info(...)` still works exactly as it does today; the listener simply gains one more output sink.
+
+**Important repo-specific requirement:** The orchestrator must pass observability config into every dynamically created broker/publisher/subscriber container. If it does not, OTLP will only work for compose-managed services and silently miss the actual data plane.
+
+### 14. Add first-class metrics for recovery, throughput, and health
+
+**File:** `aether/orchestrator/main.py`, plus new helper module(s) if needed
+
+**What:** Add real metrics rather than deriving all signals from log queries.
+
+**Minimum metric set:**
+```text
+aether_messages_published_total
+aether_messages_delivered_total
+aether_broker_recoveries_total
+aether_subscriber_reconnects_total
+aether_snapshot_runs_total
+aether_component_up
+aether_broker_peer_count
+aether_broker_subscriber_count
+aether_recovery_duration_seconds
+aether_snapshot_duration_seconds
+```
+
+**Why:** Throughput, error rate, and duration are metric problems. Loki is for logs and event forensics, not the primary engine for SLO-style analysis.
+
+**Pragmatic rollout:** Start with orchestrator-exported metrics and aggregate views. Do not force every process to grow a dedicated `/metrics` server in the first pass unless it becomes necessary.
+
+### 15. Add compose-managed observability services
 
 **File:** `docker-compose.yml`, `observability/` (new directory)
-**What:** Three new services, following the architecture in `docs/observability-plan.md` exactly.
+
+**What:** Add these services:
+
+- `otel-collector`
+- `loki`
+- `prometheus`
+- `grafana`
 
 **New files:**
-- `observability/otel-collector.yaml` — OTel Collector pipeline config
-- `observability/loki.yaml` — Loki storage config
-- `observability/grafana/provisioning/datasources/loki.yaml` — wires Loki datasource with fixed UID `loki-aether`
-- `observability/grafana/provisioning/dashboards/provider.yaml` — tells Grafana where dashboard JSON lives
-- `observability/grafana/provisioning/dashboards/aether-logs.json` — pre-built dashboard
 
-**Critical: Fixed Grafana datasource UID.** The dashboard JSON references datasources by UID. If the UID is auto-generated, it differs per install and provisioning silently fails. Use `uid: "loki-aether"` in `datasources/loki.yaml` and reference `"datasource": {"uid": "loki-aether"}` in all dashboard panels.
+- `observability/otel-collector.yaml`
+- `observability/loki.yaml`
+- `observability/prometheus.yaml`
+- `observability/grafana/provisioning/datasources/loki.yaml`
+- `observability/grafana/provisioning/datasources/prometheus.yaml`
+- `observability/grafana/provisioning/dashboards/provider.yaml`
+- provisioned dashboard JSON files
 
-**Why OTel Collector as middleware (not direct Loki push):** Direct Loki push couples the application to Loki's API. With OTel Collector as the intermediary, swapping to Datadog later is a config change (`exporter: otlp` → `exporter: datadog`), not a code change. This is the vendor-agnostic pattern documented in the observability plan.
+**Important:** Do not convert brokers/publishers/subscribers into static compose services just to make observability easier. That would be observability driving the architecture backwards.
 
-### 14. Pre-built Grafana dashboards
+### 16. Provision Grafana dashboards around the real telemetry model
 
-**File:** `observability/grafana/provisioning/dashboards/aether-logs.json`
-**What:** A Grafana dashboard JSON with these panels:
-1. **Message throughput** — `rate({job="aether"} |= "message_published" [1m])` by broker label
-2. **Failover events timeline** — `{job="aether"} |= "broker_declared_dead"` — shows when brokers died
-3. **Subscriber reconnect events** — `{job="aether"} |= "subscriber_reconnected"` — shows recovery
-4. **Error rate** — `{job="aether"} | level="ERROR"` rate
-5. **System uptime** — stat panels per broker
+**File:** `observability/grafana/provisioning/dashboards/*.json`
 
-**Why pre-built (not manual import):** The success criterion from the design doc is "visit localhost:3001 and see Grafana with live metrics." If the user has to click through Grafana to set up panels, the demo is broken. The provisioning directory approach means `docker-compose up` → Grafana starts → dashboards are already there.
+**What:** Provision at least these dashboards:
+
+1. **System overview** — component counts, throughput, error rate, snapshot activity
+2. **Failover and recovery** — broker declared dead, recovery path split, recovery duration, subscriber reconnects
+3. **Logs explorer** — broker/subscriber/orchestrator logs, errors, query by `msg_id` and `recovery_id`
+4. **Snapshot health** — snapshot runs, duration, freshness, failures
+
+**Why pre-built:** The local success criterion is still "bring the stack up and immediately have something useful to inspect." Manual Grafana setup is not acceptable.
 
 ---
 
 ## Phase 3: Demo Polish
 
-### 15. docker-compose.yml single-command demo
+### 17. docker-compose.yml single-command demo
 
 **File:** `docker-compose.yml`
-**What:** Extend the existing docker-compose to add all new services. Single `docker-compose up` starts: bootstrap, broker-1, broker-2, broker-3, publisher, subscriber, orchestrator, dashboard (nginx), otel-collector, loki, grafana.
+**What:** Extend the existing docker-compose to add observability services without changing the control-plane/data-plane split. Single `docker-compose up` should start:
+
+- bootstrap
+- orchestrator
+- dashboard
+- otel-collector
+- loki
+- prometheus
+- grafana
 
 **Ports exposed to host:**
 - `3000` — React dashboard
 - `3001` — Grafana
-- `8001` — Orchestrator API (for chaos.sh)
+- `9000` — Orchestrator API
+- `3100` — Loki HTTP API
+- `9090` — Prometheus
 
-**Service naming:** All services on `aether-net` bridge network. Orchestrator uses `hostname: orchestrator` so subscribers can reach it at `http://orchestrator:8001`.
+**Service naming:** All services stay on `aether-net`. Dynamic containers created by the orchestrator must join this same network and inherit telemetry config for collector access.
 
-**Health checks:** Add `healthcheck:` stanzas to broker services so `depends_on: condition: service_healthy` works. This prevents the demo from showing errors during startup.
+**Health checks:** Add health checks for the new observability services. Do not add static broker service health checks here because brokers are not compose-managed in the current architecture.
 
-### 16. scripts/chaos.sh
+### 18. scripts/chaos.sh
 
 **File:** `scripts/chaos.sh` (new), `scripts/reset.sh` (new)
 **What:** `chaos.sh` kills a random running broker container, waits for recovery to complete, logs timing, then auto-resets after 60s.
@@ -332,7 +412,7 @@ Use exact versions from PyPI at implementation time. These are stable packages m
 
 **Why poll for completion (not sleep):** Fixed sleeps are fragile — too short and the demo resets before recovery finishes, too long and the demo waits unnecessarily. Polling the orchestrator's `/api/state` endpoint gives an exact recovery timestamp. This also makes the timing printout accurate and impressive.
 
-### 17. README rewrite
+### 19. README rewrite
 
 **File:** `README.md`
 **What:** Rewrite with:
@@ -361,7 +441,7 @@ Document these in README.md. Being upfront about limitations is a signal of engi
 - **Not production-grade:** No authentication, no TLS, no persistence. Messages are dropped on broker failure in Path B (redistribution).
 - **Single orchestrator:** No HA for the orchestrator itself. If it crashes, failover can't be triggered until it restarts.
 - **No message replay:** Subscribers that missed messages during failover don't get them back.
-- **Docker-only demo:** Failover depends on Docker container lifecycle management. Not a library you can embed.
+- **Docker-centric demo:** The main demo path depends on Docker container lifecycle management. It demonstrates the concepts, not a production-ready control plane.
 
 ---
 
@@ -370,10 +450,9 @@ Document these in README.md. Being upfront about limitations is a signal of engi
 - Orchestrator restart resilience / `_components` persistence to disk
 - Multi-broker simultaneous failure
 - Exactly-once delivery guarantees
-- Metrics collection via OTel (traces + spans — logs only for now)
+- Distributed tracing
 - GitHub Actions CI/CD pipeline
 - Load testing / chaos at scale (> 3 brokers)
-- Distributed tracing (future phase)
 
 ---
 
@@ -399,9 +478,11 @@ Document these in README.md. Being upfront about limitations is a signal of engi
 - [x] Phase 1D test_subscriber_reconnect.py
 - [x] Phase 1D test_publisher_cooldown.py
 - [x] Phase 1D test_failover_e2e.py
-- [ ] Phase 2 item 12: OTELHandler
-- [ ] Phase 2 item 13: docker-compose observability services
-- [ ] Phase 2 item 14: Pre-built Grafana dashboards
-- [ ] Phase 3 item 15: docker-compose single-command demo
-- [ ] Phase 3 item 16: scripts/chaos.sh + reset.sh
-- [ ] Phase 3 item 17: README rewrite with screenshots
+- [ ] Phase 2 item 12: structured logging schema + explicit event logs
+- [ ] Phase 2 item 13: OTLP export in QueueListener path
+- [ ] Phase 2 item 14: first-class metrics
+- [ ] Phase 2 item 15: compose observability services
+- [ ] Phase 2 item 16: provisioned Grafana dashboards
+- [ ] Phase 3 item 17: docker-compose single-command demo
+- [ ] Phase 3 item 18: scripts/chaos.sh + reset.sh
+- [ ] Phase 3 item 19: README rewrite with screenshots

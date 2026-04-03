@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   MetricsResponse,
+  SnapshotsResponse,
   SystemState,
   TopologyResponse,
   WebSocketEvent,
@@ -20,6 +21,8 @@ interface AetherState {
   systemState: SystemState | null;
   topology: TopologyResponse | null;
   metrics: MetricsResponse | null;
+  snapshots: SnapshotsResponse | null;
+  snapshotWave: boolean;
   events: WebSocketEvent[];
   wsConnected: boolean;
   loading: boolean;
@@ -28,6 +31,7 @@ interface AetherState {
   fetchState: () => Promise<void>;
   fetchTopology: () => Promise<void>;
   fetchMetrics: () => Promise<void>;
+  fetchSnapshots: () => Promise<void>;
   refreshAll: () => Promise<void>;
   addEvent: (event: WebSocketEvent) => void;
   setWsConnected: (connected: boolean) => void;
@@ -35,12 +39,15 @@ interface AetherState {
   setChaosState: (state: ChaosState) => void;
   setChaosPhase: (phase: ChaosState["phase"], extra?: Partial<ChaosState>) => void;
   clearChaosState: () => void;
+  triggerSnapshotWave: () => void;
 }
 
 export const useAetherStore = create<AetherState>((set, get) => ({
   systemState: null,
   topology: null,
   metrics: null,
+  snapshots: null,
+  snapshotWave: false,
   events: [],
   wsConnected: false,
   loading: false,
@@ -73,6 +80,13 @@ export const useAetherStore = create<AetherState>((set, get) => ({
     }
   },
 
+  fetchSnapshots: async () => {
+    try {
+      const snapshots = await api.getSnapshots();
+      set({ snapshots });
+    } catch { }
+  },
+
   refreshAll: async () => {
     const { fetchState, fetchTopology } = get();
     await Promise.all([fetchState(), fetchTopology()]);
@@ -96,4 +110,9 @@ export const useAetherStore = create<AetherState>((set, get) => ({
     })),
 
   clearChaosState: () => set({ chaosState: null }),
+
+  triggerSnapshotWave: () => {
+    set({ snapshotWave: true });
+    setTimeout(() => set({ snapshotWave: false }), 3500);
+  },
 }));

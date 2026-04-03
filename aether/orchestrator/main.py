@@ -6,9 +6,13 @@ import asyncio
 import logging
 import random
 
+from aether.utils.log import BoundLogger, setup_logging
+
 import docker.errors
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.responses import Response
 
 from aether.core.payload_range import partition_payload_space
 from aether.core.uint8 import UInt8
@@ -26,18 +30,28 @@ from .models import (
     EventType,
     MetricsResponse,
     SnapshotStatusResponse,
+    SnapshotsResponse,
     SystemState,
     TopologyResponse,
     TriggerSnapshotRequest,
 )
 from .recovery import RecoveryManager
 from .settings import settings
+from . import metrics
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+setup_logging(
+    level=settings.log_level,
+    json_console=True,
+    # Ships orchestrator logs to the OTel Collector when OTEL_ENDPOINT is set
+    # in the environment (configured in docker-compose.yml for the orchestrator
+    # service). No-op when the env var is absent — local dev is unaffected.
+    otel_endpoint=settings.otel_endpoint,
+    service_name="aether-orchestrator",
 )
-logger = logging.getLogger(__name__)
+logger = BoundLogger(
+    logging.getLogger(__name__),
+    {"service_name": "aether-orchestrator", "component_type": "orchestrator"},
+)
 
 app = FastAPI(title="Aether Control Plane")
 app.add_middleware(
@@ -177,6 +191,18 @@ async def get_metrics() -> MetricsResponse:
     return docker_mgr.get_metrics()
 
 
+@app.get("/metrics")
+async def prometheus_metrics() -> Response:
+    """Prometheus scrape endpoint — returns all metrics in Prometheus text format.
+
+    Prometheus polls this every 15 seconds (configured in observability/prometheus.yaml).
+    The response uses CONTENT_TYPE_LATEST so Prometheus knows how to parse it.
+    generate_latest() reads from the global in-process registry, which is the same
+    registry that metrics.py, recovery.py, and the background updater all write to.
+    """
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 # ---------------------------------------------------------------------------
 # Snapshots (deferred — Phase 5.6)
 # ---------------------------------------------------------------------------
@@ -192,10 +218,11 @@ async def trigger_snapshot(
     )
 
 
-@app.get("/api/snapshots/latest", response_model=SnapshotStatusResponse)
-async def get_latest_snapshot() -> SnapshotStatusResponse:
-    """Return the most recent snapshot result. (Not yet implemented — Phase 5.6)"""
-    raise HTTPException(status_code=501, detail="Snapshot history not yet implemented")
+@app.get("/api/snapshots", response_model=SnapshotsResponse)
+async def get_snapshots() -> SnapshotsResponse:
+    """Return per-broker snapshot metadata by querying peer status servers."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, docker_mgr.get_snapshots)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +335,117 @@ async def start_health_monitoring() -> None:
         on_broker_dead=recovery_mgr.handle_broker_dead,
     )
     asyncio.create_task(health_monitor.run())
+    asyncio.create_task(_metrics_updater())
+    asyncio.create_task(_snapshot_monitor())
+
+
+async def _snapshot_monitor() -> None:
+    """Poll broker snapshot states; emit snapshot_complete when a new snapshot is detected.
+
+    Compares snapshot timestamps per broker across polls. When a broker's stored
+    snapshot timestamp advances, a new snapshot cycle completed — emit the WS event
+    so the dashboard can animate and refresh.
+    """
+    last_timestamps: dict[str, float] = {}  # broker_address -> last seen timestamp
+    loop = asyncio.get_event_loop()
+
+    while True:
+        await asyncio.sleep(8)
+        try:
+            data = await loop.run_in_executor(None, docker_mgr.get_snapshots)
+            for s in data.brokers:
+                if s.timestamp is None:
+                    continue
+                prev = last_timestamps.get(s.broker_address)
+                if prev is None or s.timestamp > prev:
+                    last_timestamps[s.broker_address] = s.timestamp
+                    if prev is not None:  # skip first observation — no "new" snapshot yet
+                        await broadcaster.emit(EventType.SNAPSHOT_COMPLETE, {
+                            "broker_id": s.broker_id,
+                            "broker_address": s.broker_address,
+                            "snapshot_id": s.snapshot_id,
+                            "subscriber_count": s.subscriber_count,
+                        })
+        except Exception:
+            pass
+
+
+async def _metrics_updater() -> None:
+    """Background task that keeps Prometheus gauges and counters current.
+
+    Runs every 15 seconds. Piggybacks on docker_mgr.get_metrics(), which
+    already polls every running broker's /status endpoint for the /api/metrics
+    REST response — so this task adds no extra broker calls.
+
+    Why 5 seconds: matches Prometheus's scrape_interval so gauges are always
+    fresh by the time Prometheus pulls them.
+
+    Counter delta strategy for messages_published_total:
+      Broker /status returns a cumulative count since that container started.
+      If a broker container restarts, its count resets to 0 — a naive approach
+      would subtract that reset and produce a large negative delta. We only
+      ever increment by a positive delta, so restarts cause a small gap rather
+      than a bogus negative spike.
+    """
+    # Track per-broker message totals from the last poll so we can compute deltas.
+    # Keyed by broker_id (int). Populated on first successful poll.
+    last_broker_totals: dict[int, int] = {}
+
+    # Track which (component_type, component_id) label sets were active in the
+    # previous poll. Any that vanish from _components between polls were deleted
+    # and must be explicitly zeroed — otherwise the gauge retains its last value
+    # of 1 indefinitely and the running-count panels never decrease.
+    _seen_components: set[tuple[str, str]] = set()
+
+    _POLL_INTERVAL = 5.0
+
+    while True:
+        await asyncio.sleep(_POLL_INTERVAL)
+        try:
+            # --- Component up/down gauges -----------------------------------
+            current_components: set[tuple[str, str]] = set()
+            for info in docker_mgr._components.values():
+                key = (info.component_type.value, str(info.component_id))
+                current_components.add(key)
+                is_up = 1 if info.status == ComponentStatus.RUNNING else 0
+                metrics.component_up.labels(
+                    component_type=info.component_type.value,
+                    component_id=str(info.component_id),
+                ).set(is_up)
+
+            # Zero out any components removed since the last poll.
+            for component_type, component_id in _seen_components - current_components:
+                metrics.component_up.labels(
+                    component_type=component_type,
+                    component_id=component_id,
+                ).set(0)
+            _seen_components = current_components
+
+            # --- Broker-level gauges + message counter ----------------------
+            broker_metrics = docker_mgr.get_metrics()
+
+            for bm in broker_metrics.brokers:
+                bid = str(bm.broker_id)
+                metrics.broker_peer_count.labels(broker_id=bid).set(bm.peer_count)
+                metrics.broker_subscriber_count.labels(broker_id=bid).set(
+                    bm.subscriber_count
+                )
+
+                # Only increment by positive delta — guards against counter
+                # resets when a broker container is restarted.
+                prev = last_broker_totals.get(bm.broker_id, 0)
+                delta = bm.messages_processed - prev
+                if delta > 0:
+                    metrics.messages_published_total.inc(delta)
+                # Always update last-known value, even on reset, so the next
+                # poll computes the delta relative to the new baseline.
+                last_broker_totals[bm.broker_id] = bm.messages_processed
+
+        except Exception:
+            # Non-fatal — a temporary Docker socket error or a broker being
+            # mid-restart shouldn't break the metrics loop. The next iteration
+            # will pick up fresh values.
+            logger.debug("metrics updater poll failed (non-critical)")
 
 
 @app.get("/api/assignments")

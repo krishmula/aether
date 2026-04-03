@@ -1,6 +1,7 @@
 import type {
   ComponentResponse,
   MetricsResponse,
+  SnapshotsResponse,
   SystemState,
   TopologyResponse,
 } from "./types";
@@ -87,3 +88,7 @@ export const seedDemo = () =>
 
 export const createChaos = () =>
   request<{ chaos_target: number }>("/chaos", { method: "POST" });
+
+// --- Snapshots ---
+
+export const getSnapshots = () => request<SnapshotsResponse>("/snapshots");

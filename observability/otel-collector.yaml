@@ -1,0 +1,71 @@
+# OpenTelemetry Collector config for Aether local observability stack.
+#
+# Data flow:
+#   All Aether processes (orchestrator + dynamically spawned brokers/pubs/subs)
+#   → OTLP/HTTP on port 4318 → this collector → Loki
+#
+# Label strategy:
+#   Three attributes are promoted to Loki stream labels (indexed, low-cardinality):
+#     service_name    — e.g. "aether-orchestrator", "aether-broker"
+#     component_type  — "broker", "subscriber", "publisher", "orchestrator"
+#     event_type      — "broker_declared_dead", "broker_recovered", etc.
+#
+#   Everything else (broker_id, recovery_id, snapshot_id, msg_id) stays in the
+#   log body as JSON attributes. These are NOT indexed — query them with | json
+#   in LogQL at search time. This keeps Loki stream cardinality low.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Sets service.namespace=aether on every log record so the Loki exporter
+  # constructs job="aether/<service.name>" (e.g. "aether/orchestrator",
+  # "aether/broker"). Queries use {job=~"aether/.*"} to match all components
+  # or {job="aether/orchestrator"} to target one specifically.
+  resource:
+    attributes:
+      - action: insert
+        key: service.namespace
+        value: aether
+
+  # Promote the three chosen attributes to Loki stream labels.
+  # The loki.attribute.labels hint is read by the Loki exporter — any
+  # attribute named in the comma-separated list is extracted into the
+  # Loki stream label set instead of the log line body.
+  attributes:
+    actions:
+      - action: insert
+        key: loki.attribute.labels
+        value: service_name, component_type, event_type
+
+  # Batch records before export to reduce HTTP round-trips to Loki.
+  # 1s timeout keeps latency low enough for a local dev environment.
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+
+exporters:
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    # Only emit the `job` and `level` default labels — skip the `exporter`
+    # label (adds no query value) and let our attribute processor handle the
+    # domain-specific labels above.
+    default_labels_enabled:
+      exporter: false
+      job: true
+      level: true
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      # Order matters: resource enrichment first, then attribute label hints,
+      # then batch. Batching must be last so records are fully enriched before
+      # they're grouped and sent.
+      processors: [resource, attributes, batch]
+      exporters: [loki]

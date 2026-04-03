@@ -176,6 +176,23 @@ class SnapshotStatusResponse(BaseModel):
     status: str = "none"  # "none", "in_progress", "complete"
 
 
+class BrokerSnapshotInfo(BaseModel):
+    broker_id: int
+    broker_address: str
+    snapshot_id: str | None = None
+    timestamp: float | None = None
+    age_seconds: float | None = None
+    peer_count: int = 0
+    subscriber_count: int = 0
+    seen_message_count: int = 0
+    snapshot_state: str = "idle"  # "idle" | "recording"
+
+
+class SnapshotsResponse(BaseModel):
+    brokers: list[BrokerSnapshotInfo] = Field(default_factory=list)
+    fetched_at: float
+
+
 # --- WebSocket Event ---
 
 

@@ -123,7 +123,10 @@ class GossipBroker:
                 self.peer_brokers.add(peer)
                 self.last_seen[peer] = time.time()
             if is_new:
-                self.log.info("peer discovered: %s", peer)
+                self.log.info(
+                    "peer discovered: %s", peer,
+                    extra={"event_type": "peer_joined"},
+                )
             else:
                 self.log.debug("peer heartbeat: %s", peer)
 
@@ -330,6 +333,7 @@ class GossipBroker:
             "initiating snapshot snapshot_id=%s peers=%d",
             snapshot_id[:8],
             len(peers_to_notify),
+            extra={"event_type": "snapshot_started", "snapshot_id": snapshot_id},
         )
 
         for peer in peers_to_notify:
@@ -432,6 +436,10 @@ class GossipBroker:
                 snapshot.snapshot_id[:8],
                 len(snapshot.remote_subscribers),
                 len(snapshot.peer_brokers),
+                extra={
+                    "event_type": "snapshot_completed",
+                    "snapshot_id": snapshot.snapshot_id,
+                },
             )
 
             self._replicate_snapshot(snapshot)
@@ -843,6 +851,7 @@ class GossipBroker:
                         "peer evicted (no heartbeat for %.1fs): %s",
                         current_time - last_time,
                         peer,
+                        extra={"event_type": "peer_evicted"},
                     )
 
     def get_count(self, sub: Subscriber, payload) -> int:

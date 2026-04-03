@@ -106,3 +106,20 @@ export interface WebSocketEvent {
   data: Record<string, unknown>;
   timestamp: number;
 }
+
+export interface BrokerSnapshotInfo {
+  broker_id: number;
+  broker_address: string;
+  snapshot_id: string | null;
+  timestamp: number | null;
+  age_seconds: number | null;
+  peer_count: number;
+  subscriber_count: number;
+  seen_message_count: number;
+  snapshot_state: string;
+}
+
+export interface SnapshotsResponse {
+  brokers: BrokerSnapshotInfo[];
+  fetched_at: number;
+}

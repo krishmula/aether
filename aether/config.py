@@ -51,6 +51,7 @@ class Config:
     log_level: str = "INFO"
     log_file: Optional[str] = None
     log_json_console: bool = False
+    log_otel_endpoint: Optional[str] = None
 
     @property
     def bootstrap_address(self) -> NodeAddress:
@@ -88,6 +89,7 @@ class Config:
             log_level=data.get("logging", {}).get("level", "INFO"),
             log_file=data.get("logging", {}).get("log_file"),
             log_json_console=data.get("logging", {}).get("json_console", False),
+            log_otel_endpoint=data.get("logging", {}).get("otel_endpoint"),
         )
 
     @classmethod

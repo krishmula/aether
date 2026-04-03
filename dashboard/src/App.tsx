@@ -11,6 +11,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 export default function App() {
   const refreshAll = useAetherStore((s) => s.refreshAll);
   const fetchMetrics = useAetherStore((s) => s.fetchMetrics);
+  const fetchSnapshots = useAetherStore((s) => s.fetchSnapshots);
 
   useWebSocket();
 
@@ -23,6 +24,12 @@ export default function App() {
     const id = setInterval(fetchMetrics, 2000);
     return () => clearInterval(id);
   }, [fetchMetrics]);
+
+  useEffect(() => {
+    fetchSnapshots();
+    const id = setInterval(fetchSnapshots, 30_000);
+    return () => clearInterval(id);
+  }, [fetchSnapshots]);
 
   return (
     <div className="h-screen grid grid-rows-[56px_1fr_240px] grid-cols-[280px_1fr] bg-bg">

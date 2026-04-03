@@ -26,6 +26,19 @@ from queue import Queue
 from typing import Any, MutableMapping, Optional, Tuple
 
 # ---------------------------------------------------------------------------
+# Optional OpenTelemetry import — soft dependency, no-op when not installed
+# ---------------------------------------------------------------------------
+
+try:
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+    _OTEL_AVAILABLE = True
+except ImportError:
+    _OTEL_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 # Correlation ID — propagates gossip msg_id through the call stack
 # ---------------------------------------------------------------------------
 
@@ -98,7 +111,29 @@ _CYAN_BOLD = "\033[1m\033[96m"
 _WHITE_BOLD = "\033[1m\033[97m"
 
 # Fields that BoundLogger or bind_msg_id may attach to records.
-_CONTEXT_FIELDS = ("broker", "node", "publisher", "subscriber", "bootstrap", "msg_id")
+# Extended for observability (Phase A1): includes component identification,
+# event typing, and correlation IDs for distributed tracing.
+_CONTEXT_FIELDS = (
+    # Legacy fields (maintained for backward compatibility)
+    "broker",
+    "node",
+    "publisher",
+    "subscriber",
+    "bootstrap",
+    "msg_id",
+    # New observability fields (Phase A1)
+    "service_name",  # Service identifier (e.g., "aether-broker", "aether-orchestrator")
+    "component_type",  # Type of component: broker, subscriber, publisher, bootstrap, orchestrator
+    "component_id",  # Numeric or string ID of the component instance
+    "broker_id",  # Specific broker identifier
+    "subscriber_id",  # Specific subscriber identifier
+    "publisher_id",  # Specific publisher identifier
+    "event_type",  # Stable event name for log-based metrics (e.g., "broker_declared_dead")
+    "recovery_id",  # Correlation ID for recovery workflows
+    "snapshot_id",  # Correlation ID for snapshot operations
+    "recovery_path",  # Recovery strategy: "replacement" or "redistribution"
+    "error_kind",  # Categorized error type for aggregation
+)
 
 
 class ColoredFormatter(logging.Formatter):
@@ -148,7 +183,7 @@ class JSONFormatter(logging.Formatter):
     """Machine-readable JSON formatter for production deployments.
 
     Each log line is a single JSON object suitable for ingestion by
-    Datadog, Splunk, ELK, or any structured log aggregator.
+    Datadog, Splunk, ELK, Loki, or any structured log aggregator.
 
     Fields always present:
         timestamp  ISO-8601 UTC with microseconds
@@ -157,9 +192,14 @@ class JSONFormatter(logging.Formatter):
         thread     thread name (set by threading.Thread(name=...))
         message    formatted log message
 
-    Fields present when set by BoundLogger or bind_msg_id():
-        broker / node / publisher / subscriber / bootstrap
-        msg_id
+    Fields present when set by BoundLogger or context:
+        Legacy context:
+            broker / node / publisher / subscriber / bootstrap / msg_id
+        Observability (Phase A1):
+            service_name / component_type / component_id
+            broker_id / subscriber_id / publisher_id
+            event_type / recovery_id / snapshot_id
+            recovery_path / error_kind
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -185,6 +225,46 @@ class JSONFormatter(logging.Formatter):
 
 
 # ---------------------------------------------------------------------------
+# OTLP log handler — bridges Python logging to the OTel Collector
+# ---------------------------------------------------------------------------
+
+
+class _OTLPHandler(logging.Handler):
+    """Ships log records to an OpenTelemetry Collector via OTLP/HTTP.
+
+    Attached to the QueueListener so the calling thread is never blocked
+    by network I/O. BatchLogRecordProcessor handles async batching and
+    retry internally.
+
+    All structured fields on the record (event_type, broker_id, etc.) flow
+    through automatically because LoggingHandler reads record.__dict__ when
+    building OTel LogRecord attributes.
+    """
+
+    def __init__(self, endpoint: str, service_name: str = "aether") -> None:
+        super().__init__()
+        from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
+        exporter = OTLPLogExporter(endpoint=endpoint)
+        # service.name is what the OTel Collector / Loki exporter uses to set the
+        # `job` stream label.  Without it the label defaults to "unknown_service"
+        # and every {job="aether"} query in Grafana returns no data.
+        resource = Resource.create({"service.name": service_name})
+        provider = LoggerProvider(resource=resource)
+        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+        self._otel_handler = LoggingHandler(
+            level=logging.DEBUG, logger_provider=provider
+        )
+        self._provider = provider
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._otel_handler.emit(record)
+
+    def close(self) -> None:
+        self._provider.shutdown()
+        super().close()
+
+
+# ---------------------------------------------------------------------------
 # setup_logging
 # ---------------------------------------------------------------------------
 
@@ -195,6 +275,8 @@ def setup_logging(
     level: str = "INFO",
     log_file: Optional[str] = None,
     json_console: bool = False,
+    otel_endpoint: Optional[str] = None,
+    service_name: str = "aether",
 ) -> None:
     """Configure the aether logger hierarchy. Call once per process.
 
@@ -206,14 +288,18 @@ def setup_logging(
     drains the queue and performs actual I/O (file writes, stdout writes).
 
     Args:
-        level:        Minimum level for the console handler.
-                      One of DEBUG / INFO / WARNING / ERROR. Default: INFO.
-        log_file:     Optional path to a rotating JSON log file.
-                      When set, all records at DEBUG+ are written as JSON,
-                      independent of the console level.
-        json_console: Emit JSON on stdout even when attached to a TTY.
-                      Set to True in containerised / systemd deployments
-                      where stdout is collected by a log aggregator.
+        level:         Minimum level for the console handler.
+                       One of DEBUG / INFO / WARNING / ERROR. Default: INFO.
+        log_file:      Optional path to a rotating JSON log file.
+                       When set, all records at DEBUG+ are written as JSON,
+                       independent of the console level.
+        json_console:  Emit JSON on stdout even when attached to a TTY.
+                       Set to True in containerised / systemd deployments
+                       where stdout is collected by a log aggregator.
+        otel_endpoint: Base URL of an OpenTelemetry Collector OTLP/HTTP
+                       endpoint (e.g. "http://otel-collector:4318"). When
+                       set, all log records are also shipped to the collector.
+                       No-op when opentelemetry packages are not installed.
     """
     global _listener
 
@@ -247,6 +333,12 @@ def setup_logging(
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(JSONFormatter())
         handlers.append(fh)
+
+    # -- OTLP handler (optional) ------------------------------------------
+    if otel_endpoint and _OTEL_AVAILABLE:
+        otlp = _OTLPHandler(f"{otel_endpoint}/v1/logs", service_name=service_name)
+        otlp.setLevel(logging.DEBUG)
+        handlers.append(otlp)
 
     # -- Async dispatch via QueueListener ---------------------------------
     # Log calls on daemon threads are non-blocking: they enqueue a record

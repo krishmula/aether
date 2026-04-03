@@ -27,8 +27,10 @@ export function useWebSocket() {
   const setWsConnected = useAetherStore((s) => s.setWsConnected);
   const refreshAll = useAetherStore((s) => s.refreshAll);
   const fetchState = useAetherStore((s) => s.fetchState);
+  const fetchSnapshots = useAetherStore((s) => s.fetchSnapshots);
   const setChaosPhase = useAetherStore((s) => s.setChaosPhase);
   const clearChaosState = useAetherStore((s) => s.clearChaosState);
+  const triggerSnapshotWave = useAetherStore((s) => s.triggerSnapshotWave);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +65,9 @@ export function useWebSocket() {
           } else if (event.type === "broker_recovery_failed") {
             setChaosPhase("failed");
             setTimeout(clearChaosState, 8000);
+          } else if (event.type === "snapshot_complete") {
+            triggerSnapshotWave();
+            fetchSnapshots();
           }
 
           if (STRUCTURAL_EVENTS.has(event.type)) {
@@ -97,5 +102,5 @@ export function useWebSocket() {
       clearTimeout(timeout);
       wsRef.current?.close();
     };
-  }, [addEvent, setWsConnected, refreshAll, fetchState, setChaosPhase, clearChaosState]);
+  }, [addEvent, setWsConnected, refreshAll, fetchState, fetchSnapshots, setChaosPhase, clearChaosState, triggerSnapshotWave]);
 }

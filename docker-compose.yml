@@ -57,6 +57,7 @@ services:
       BOOTSTRAP_PORT: "7000"
       AETHER_IMAGE: aether:latest
       DOCKER_NETWORK: aether-net
+      OTEL_ENDPOINT: http://otel-collector:4318
     depends_on:
       bootstrap:
         condition: service_healthy
@@ -92,6 +93,82 @@ services:
     networks:
       - aether-net
     restart: "no"
+
+  # ── otel-collector ────────────────────────────────────────────────────────
+  # Receives OTLP logs from all Aether processes and forwards to Loki.
+  # Pinned to a specific version — the Loki exporter config schema changes
+  # between otelcol-contrib releases and latest can break the config silently.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.95.0
+    container_name: aether-otel-collector
+    hostname: otel-collector
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC (future use)
+      - "4318:4318"   # OTLP HTTP (used by Python opentelemetry-exporter-otlp-proto-http)
+    depends_on:
+      - loki
+    networks:
+      - aether-net
+    restart: unless-stopped
+
+  # ── loki ──────────────────────────────────────────────────────────────────
+  # Log storage and query engine. Receives from otel-collector, queried by Grafana.
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: aether-loki
+    hostname: loki
+    command: -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/loki.yaml:ro
+    ports:
+      - "3100:3100"
+    networks:
+      - aether-net
+    restart: unless-stopped
+
+  # ── prometheus ────────────────────────────────────────────────────────────
+  # Scrapes /metrics from the orchestrator every 15s. No hard startup deps —
+  # Prometheus retries scrape targets that aren't ready yet.
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: aether-prometheus
+    hostname: prometheus
+    volumes:
+      - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - aether-net
+    restart: unless-stopped
+
+  # ── grafana ───────────────────────────────────────────────────────────────
+  # Dashboards and log/metric exploration. Available at http://localhost:3001
+  # (port 3000 is taken by the React dashboard). Anonymous access enabled so
+  # there's no login step in the demo.
+  # Datasources (Prometheus + Loki) and dashboard provider are provisioned
+  # automatically from observability/grafana/provisioning/ on first boot.
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: aether-grafana
+    hostname: grafana
+    environment:
+      GF_SERVER_HTTP_PORT: "3001"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3001"
+    depends_on:
+      - loki
+      - prometheus
+    networks:
+      - aether-net
+    restart: unless-stopped
 
 # ── network ───────────────────────────────────────────────────────────────
 networks:

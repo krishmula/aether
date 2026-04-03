@@ -1,211 +1,444 @@
-# Aether Observability Plan: Grafana + Loki via OpenTelemetry
+# Aether Observability Implementation Plan
 
-## Overview
+## Context
 
-This document describes the full plan to integrate production-grade log observability into Aether. The design is **backend-agnostic by default**: logs flow through an OpenTelemetry Collector, which today exports to Grafana Loki, and can be redirected to Datadog (or any other backend) by changing a single config file — zero Python code changes required.
+Build a full telemetry stack for Aether: structured logs → OTel Collector → Loki/Prometheus → Grafana.
 
----
-
-## 1. Why This Stack
-
-| Concern | Answer |
-|---------|--------|
-| **Free forever** | Loki + Grafana are open source and self-hosted |
-| **Vendor-agnostic** | OTel Collector decouples the app from the storage backend |
-| **Datadog-ready** | Swap the OTel exporter, nothing else changes |
-| **Zero new log format** | Aether already emits structured JSON; OTel reads it as-is |
-| **Production pattern** | OTel is the CNCF standard adopted by Google, Microsoft, AWS |
-| **Extensible** | Same pipeline adds metrics and distributed traces later |
+**What's already done (Phase A1 — complete):**
+- `aether/utils/log.py` has all structured fields: `event_type`, `recovery_id`, `snapshot_id`, `component_type`, `component_id`, etc. via `_CONTEXT_FIELDS`
+- `BoundLogger`, `JSONFormatter`, `QueueHandler/QueueListener` async pipeline are complete
+- `tests/unit/test_logging_schema.py` has 12 passing schema tests
 
 ---
 
-## 2. Architecture
+## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        aether-net (Docker bridge)                    │
-│                                                                       │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
-│  │ broker-1 │  │ broker-2 │  │publisher │  │subscriber│  ...        │
-│  │          │  │          │  │          │  │          │             │
-│  │ stdlib   │  │ stdlib   │  │ stdlib   │  │ stdlib   │             │
-│  │ logging  │  │ logging  │  │ logging  │  │ logging  │             │
-│  │    │     │  │    │     │  │    │     │  │    │     │             │
-│  │ OTel SDK │  │ OTel SDK │  │ OTel SDK │  │ OTel SDK │             │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘            │
-│       │             │             │              │                   │
-│       └─────────────┴─────────────┴──────────────┘                  │
-│                             │ OTLP/gRPC (port 4317)                  │
-│                     ┌───────▼────────┐                               │
-│                     │ OTel Collector │                               │
-│                     │                │                               │
-│                     │ recv: otlp     │                               │
-│                     │ proc: batch    │                               │
-│                     │ exp:  loki     │◄── swap to datadog here       │
-│                     └───────┬────────┘                               │
-│                             │ HTTP push                              │
-│                     ┌───────▼────────┐                               │
-│                     │      Loki      │                               │
-│                     │  (log store)   │                               │
-│                     └───────┬────────┘                               │
-│                             │                                        │
-│                     ┌───────▼────────┐                               │
-│                     │    Grafana     │  ← http://localhost:3001      │
-│                     │  (query + UI)  │                               │
-│                     └────────────────┘                               │
-│                                                                       │
-│  ┌──────────────────┐  ┌──────────────────┐                         │
-│  │   bootstrap      │  │  orchestrator    │  (existing services)    │
-│  └──────────────────┘  └──────────────────┘                         │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Log record journey
-
-```
-Python log call
-  → BoundLogger.process()      # injects broker=, msg_id=, etc.
-  → QueueHandler               # non-blocking enqueue (existing)
-  → QueueListener              # drains queue on dedicated thread (existing)
-      ├── StreamHandler        # colored stdout (existing, unchanged)
-      ├── RotatingFileHandler  # optional JSON file (existing, unchanged)
-      └── OTELHandler (new)    # converts to OTel LogRecord
-            → BatchLogRecordProcessor
-            → OTLPLogExporter
-            → OTel Collector (gRPC 4317)
-            → Loki
-            → Grafana
+```text
+                            ┌────────────────────────────┐
+                            │         Grafana :3001      │
+                            │  dashboards + explore       │
+                            └───────────┬────────────────┘
+                                        │
+                       ┌────────────────┴───────────────┐
+                       │                                │
+                       ▼                                ▼
+              ┌──────────────────┐             ┌──────────────────┐
+              │       Loki       │             │    Prometheus    │
+              │  logs + events   │             │ metrics + rates  │
+              └────────┬─────────┘             └────────┬─────────┘
+                       │                                │
+                       └──────────────┬─────────────────┘
+                                      ▼
+                           ┌────────────────────┐
+                           │ OTel Collector     │
+                           │ logs + metrics     │
+                           └─────────┬──────────┘
+                                     │
+        ┌────────────────────────────┼────────────────────────────┐
+        │                            │                            │
+        ▼                            ▼                            ▼
+┌────────────────┐          ┌────────────────┐          ┌────────────────┐
+│ bootstrap      │          │ orchestrator   │          │ dynamic data   │
+│ structured logs│          │ logs + metrics │          │ plane nodes    │
+│ + status       │          │ + /metrics     │          │ brokers/pubs/  │
+└────────────────┘          └────────────────┘          │ subs           │
+                                                       └────────────────┘
 ```
 
 ---
 
-## 3. New Files & Directory Structure
+## Implementation Steps
 
+### Step 1 — Add packages to `pyproject.toml`
+
+Add to `dependencies`:
 ```
-aether/
-├── observability/                          ← new top-level directory
-│   ├── otel-collector.yaml                 ← OTel Collector pipeline config
-│   ├── loki.yaml                           ← Loki storage config
-│   └── grafana/
-│       └── provisioning/
-│           ├── datasources/
-│           │   └── loki.yaml               ← auto-wires Loki datasource
-│           └── dashboards/
-│               ├── provider.yaml           ← tells Grafana where to find dashboards
-│               └── aether-logs.json        ← pre-built log explorer dashboard
-│
-├── aether/
-│   ├── utils/
-│   │   └── log.py                          ← add setup_otel_logging(), OTELHandler
-│   └── config.py                           ← add log_otel_endpoint field
-│
-├── config.docker.yaml                      ← add otel_endpoint: http://otel-collector:4317
-├── docker-compose.yml                      ← add otel-collector, loki, grafana services
-└── pyproject.toml                          ← add opentelemetry dependencies
+"prometheus-client>=0.20.0",
+"opentelemetry-api>=1.20.0",
+"opentelemetry-sdk>=1.20.0",
+"opentelemetry-exporter-otlp-proto-http>=1.20.0",
 ```
 
 ---
 
-## 4. Phase 1: Infrastructure
+### Step 2 — Add `log_otel_endpoint` to config
 
-### 4.1 New Python dependencies
+**`aether/config.py`:**
+- Add `log_otel_endpoint: Optional[str] = None` to `Config` dataclass
+- In `from_yaml`: `log_otel_endpoint=data.get("logging", {}).get("otel_endpoint")`
 
-**`pyproject.toml`** — add to `[project] dependencies`:
-
-```toml
-"opentelemetry-sdk>=1.25.0",
-"opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+**`config.docker.yaml`** (under logging section):
+```yaml
+logging:
+  level: INFO
+  log_file: null
+  json_console: true
+  otel_endpoint: null  # set to http://otel-collector:4318 to enable OTLP
 ```
 
-> Check [PyPI](https://pypi.org/project/opentelemetry-sdk/) for the latest stable version before implementing.
+---
 
-### 4.2 Docker Compose additions
+### Step 3 — Add OTLP handler to `aether/utils/log.py`
 
-**`docker-compose.yml`** — append three services and two volumes:
+**What this does and why it matters:**
+Right now all structured logs stay local — stdout or a rotating file. Grafana and Loki can't
+see them. This step adds one more sink to the existing async logging pipeline:
+
+```
+# Before
+app code → QueueHandler → [QueueListener thread] → stdout / file
+
+# After
+app code → QueueHandler → [QueueListener thread] → stdout / file
+                                                  → OTLPHandler → OTel Collector → Loki
+```
+
+`_OTLPHandler` is a standard Python `logging.Handler` that converts each log record into an
+OpenTelemetry log record and ships it to the OTel Collector over HTTP. Because it attaches to
+the `QueueListener` (not the calling thread), the application never blocks on a network call.
+
+This is the bridge between Aether's application logs and the rest of the observability stack.
+Without it the OTel Collector has nothing to receive, Loki has nothing to store, and Grafana's
+log panels are empty. Every `event_type` field added in Steps 4–5 only becomes queryable in
+Grafana because this handler ships it to Loki.
+
+Add optional `otel_endpoint` parameter to `setup_logging`. Add `_OTLPHandler` class guarded by `try/ImportError` at module level (soft dependency — system runs without OTel packages installed).
+
+```python
+# Soft import guard at module top
+try:
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+    _OTEL_AVAILABLE = True
+except ImportError:
+    _OTEL_AVAILABLE = False
+
+class _OTLPHandler(logging.Handler):
+    def __init__(self, endpoint: str) -> None:
+        super().__init__()
+        exporter = OTLPLogExporter(endpoint=endpoint)
+        provider = LoggerProvider()
+        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+        self._otel_handler = LoggingHandler(level=logging.DEBUG, logger_provider=provider)
+        self._provider = provider
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._otel_handler.emit(record)
+
+    def close(self) -> None:
+        self._provider.shutdown()
+        super().close()
+```
+
+In `setup_logging`, add `otel_endpoint: Optional[str] = None` param. After file handler:
+```python
+if otel_endpoint and _OTEL_AVAILABLE:
+    otlp = _OTLPHandler(f"{otel_endpoint}/v1/logs")
+    otlp.setLevel(logging.DEBUG)
+    handlers.append(otlp)
+```
+
+Update all 4 CLI entry points (`run_bootstrap.py`, `run_broker.py`, `run_publishers.py`,
+`run_subscribers.py`) to add `otel_endpoint=config.log_otel_endpoint` to their `setup_logging(...)` calls.
+
+---
+
+### Step 4 — Unify orchestrator logging (Phase A2)
+
+**`aether/orchestrator/main.py`** — replace `logging.basicConfig(...)` lines with:
+```python
+from aether.utils.log import setup_logging, BoundLogger
+
+setup_logging(level="INFO", json_console=True)
+logger = BoundLogger(
+    logging.getLogger(__name__),
+    {"service_name": "aether-orchestrator", "component_type": "orchestrator"},
+)
+```
+
+Add `log_level: str = "INFO"` to `aether/orchestrator/settings.py`.
+
+---
+
+### Step 5 — Explicit event_type logs (Phase A3 + A4)
+
+**Logger patterns in this codebase:**
+
+There are two logger patterns and it matters which one a file uses:
+
+1. **`self.log = BoundLogger(logger, {...})`** — used by classes that have a per-instance
+   network identity (address, port). `GossipBroker`, `NetworkPublisher`, `NetworkSubscriber`,
+   `NetworkNode`, and `BootstrapNode` all do this so every log call automatically carries the
+   component's address without passing it explicitly.
+
+2. **`logger = logging.getLogger(__name__)`** — used by everything else: CLI scripts, utility
+   modules, and orchestrator service classes. No per-instance context to bind.
+
+`RecoveryManager` and `HealthMonitor` were written before observability was planned. As
+orchestrator-internal service classes — no network address, no instance identity — they
+naturally got plain `getLogger`. When Step 4 unified orchestrator logging, only `main.py`
+was explicitly converted to `BoundLogger`. Steps 5 and 7 bolted `extra={}` dicts onto
+individual log calls in `recovery.py` and `health.py` but didn't change the module-level
+logger type. This means those log records don't automatically carry `service_name` or
+`component_type` — fields that the OTel Collector promotes to Loki stream labels.
+
+**The fix:** both files should have a module-level `BoundLogger` wrapping their `getLogger`
+with `{"service_name": "aether-orchestrator", "component_type": "orchestrator"}` — the same
+fields `main.py` uses. The dashboard queries all filter on `event_type`, which IS in the
+`extra={}` dicts, so nothing is broken — but without this fix you can't run a LogQL query
+like `{component_type="orchestrator"}` and have recovery/health events show up.
+
+**What this does and why it matters:**
+The logging schema already supports `event_type`, `recovery_id`, and `snapshot_id` — but
+nothing in the application sets them yet. Logs exist as free-text messages like
+`"Broker 2 declared dead"`. You can't query, alert, or graph on a substring.
+
+This step attaches stable, machine-readable field values to log calls that already exist at
+key lifecycle moments. No new log calls — just `extra={"event_type": "..."}` on the ones
+already there. It also threads a `recovery_id` UUID through the entire recovery flow so every
+record across `health.py` → `recovery.py` → helpers all carry the same ID.
+
+After this step you can write LogQL like:
+```logql
+{job="aether"} | json | recovery_id="abc-123"
+```
+...and get every log from the health check that noticed the failure through to the final
+outcome, all correlated by one ID. Grafana's log panels can also filter by
+`event_type="broker_declared_dead"` as an indexed label rather than a substring match.
+
+This is also the prerequisite for Step 7 (Prometheus metrics) — recovery counters need to
+know when a recovery succeeded or failed, which only works if the code tracks it explicitly.
+
+Add `extra={"event_type": "..."}` to key lifecycle log calls in these files:
+
+#### `aether/orchestrator/recovery.py`
+- Add `import uuid`, `import time`
+- Generate `recovery_id = str(uuid.uuid4())` and `_t0 = time.time()` at top of `handle_broker_dead`
+- Pass both to `_recover_replacement` and `_recover_redistribution` as args
+
+| Site | event_type | extra fields |
+|---|---|---|
+| After `BROKER_DECLARED_DEAD` broadcast | `broker_declared_dead` | broker_id, recovery_id |
+| `_recover_replacement` start | `broker_recovery_started` | broker_id, recovery_id, recovery_path="replacement" |
+| `_recover_replacement` success | `broker_recovered` | broker_id, recovery_id, recovery_path="replacement" |
+| `_recover_redistribution` start | `broker_recovery_started` | broker_id, recovery_id, recovery_path="redistribution" |
+| `_recover_redistribution` success | `broker_recovered` | broker_id, recovery_id, recovery_path="redistribution" |
+| Failure paths | `broker_recovery_failed` | broker_id, recovery_id, error_kind |
+
+#### `aether/orchestrator/health.py`
+- On failure increment: `extra={"event_type": "broker_poll_failed", "broker_id": broker.component_id}`
+- On threshold reached: `extra={"event_type": "broker_declared_dead", "broker_id": broker.component_id}`
+
+#### `aether/gossip/broker.py`
+- `add_peer` for new peer: `extra={"event_type": "peer_joined"}`
+- `_check_heartbeat_loop` eviction: `extra={"event_type": "peer_evicted"}`
+- Snapshot initiation: `extra={"event_type": "snapshot_started", "snapshot_id": snapshot_id}`
+- Snapshot completion: `extra={"event_type": "snapshot_completed", "snapshot_id": snapshot.snapshot_id}`
+
+#### `aether/network/subscriber.py`
+- Reconnect success: `extra={"event_type": "subscriber_reconnected"}`
+
+#### `aether/network/publisher.py`
+- Send success: `extra={"event_type": "message_published"}`
+- Send failure: `extra={"event_type": "send_failure", "error_kind": "send_error"}`
+
+---
+
+### Step 6 — New file: `aether/orchestrator/metrics.py`
+
+Module-level Prometheus singletons imported by both `main.py` and `recovery.py`:
+
+```python
+from prometheus_client import Counter, Gauge, Histogram
+
+broker_recoveries_total = Counter(
+    "aether_broker_recoveries_total", "Total broker recovery attempts",
+    ["recovery_path", "result"],
+)
+component_up = Gauge(
+    "aether_component_up", "Whether a component is running (1=up, 0=down)",
+    ["component_type", "component_id"],
+)
+recovery_duration_seconds = Histogram(
+    "aether_recovery_duration_seconds", "Duration of a broker recovery attempt",
+    buckets=[1, 2, 5, 10, 15, 30, 60],
+)
+messages_published_total = Counter(
+    "aether_messages_published_total", "Messages published (from broker /status polling)",
+)
+broker_peer_count = Gauge(
+    "aether_broker_peer_count", "Current peer count per broker", ["broker_id"],
+)
+broker_subscriber_count = Gauge(
+    "aether_broker_subscriber_count", "Current subscriber count per broker", ["broker_id"],
+)
+subscriber_reconnects_total = Counter(
+    "aether_subscriber_reconnects_total", "Subscriber reconnects tracked by orchestrator",
+)
+snapshot_runs_total = Counter(
+    "aether_snapshot_runs_total", "Snapshot runs by result", ["result"],
+)
+```
+
+---
+
+### Step 7 — Wire metrics into orchestrator
+
+**What this does and why it matters:**
+Step 6 defined the metric objects — they exist but are all zero. Nothing updates them yet.
+This step connects them to the live system via three pieces:
+
+1. **`recovery.py`** — increments counters and records histogram observations at the exact
+   success/failure branch points added in Step 5. This is the most important piece: recovery
+   duration and outcome are Aether's primary SLOs.
+
+2. **`main.py` `/metrics` endpoint** — a single new route that calls
+   `prometheus_client.generate_latest()` and returns Prometheus text format. Without this,
+   Prometheus has nowhere to pull data from and all graphs stay flat.
+
+3. **`main.py` background poller** — gauges represent *current state*, not transitions, so
+   they can't be event-driven. A lightweight `asyncio` task runs every 15s, calls the
+   existing `docker_mgr.get_metrics()` (which already polls broker `/status`), and sets gauge
+   values from the result. `messages_published_total` is also driven from here, incremented
+   only by positive deltas to handle broker restarts resetting their internal counters.
+
+After this step, killing a broker produces a visible spike in `aether_broker_recoveries_total`,
+a data point in the recovery duration histogram, and `aether_component_up` drops to 0 for
+that broker then returns to 1 after recovery completes.
+
+**`aether/orchestrator/recovery.py`** — import from `.metrics` and update at recovery points:
+```python
+broker_recoveries_total.labels(recovery_path="replacement", result="success").inc()
+recovery_duration_seconds.observe(time.time() - _t0)
+subscriber_reconnects_total.inc(len(orphans))  # redistribution path
+broker_recoveries_total.labels(recovery_path=path, result="failure").inc()  # failure path
+```
+
+**`aether/orchestrator/main.py`** — add `/metrics` endpoint:
+```python
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
+
+@app.get("/metrics")
+async def prometheus_metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+```
+
+Add background updater on startup (polls `docker_mgr.get_metrics()` every 15s) to keep
+`component_up`, `broker_peer_count`, `broker_subscriber_count`, and `messages_published_total`
+current. Track previous message total per broker to handle counter resets on container restart.
+
+---
+
+### Step 8 — Propagate OTel config to dynamic containers (Phase B2)
+
+**What this does and why it matters:**
+Even with the OTel Collector running, no process currently ships logs to it. This step
+closes that gap via two targeted changes:
+
+1. **Orchestrator ships its own logs.** `OrchestratorSettings` gets an `otel_endpoint`
+   field (sourced from an env var so docker-compose can set it). `setup_logging` in
+   `main.py` is updated to pass it through. The orchestrator's structured logs — including
+   all `event_type` fields from Steps 4–5 — now flow to Loki.
+
+2. **Dynamic containers inherit the endpoint via `config.docker.yaml`.** Brokers,
+   publishers, and subscribers already mount `/app/config.docker.yaml` at startup and their
+   CLI entry points already call `setup_logging(otel_endpoint=config.log_otel_endpoint)`
+   (wired in Step 3). Setting `otel_endpoint: http://otel-collector:4318` in
+   `config.docker.yaml` once is enough — every dynamic container that mounts it picks it up
+   automatically. The hostname `otel-collector` resolves because all containers share
+   `aether-net`. No per-container env var injection needed.
+
+After this step, every process in the system ships structured logs to the same collector.
+
+**`aether/orchestrator/settings.py`** — add:
+```python
+otel_endpoint: Optional[str] = None
+```
+
+Since all dynamic containers mount `/app/config.docker.yaml`, setting `otel_endpoint` there
+is enough — the CLI scripts already read and pass `config.log_otel_endpoint` to `setup_logging`.
+
+When running with the observability stack, set in `config.docker.yaml`:
+```yaml
+logging:
+  otel_endpoint: http://otel-collector:4318
+```
+
+---
+
+### Step 9 — Add observability services to `docker-compose.yml`
+
+Add after `dashboard` service (Grafana on port 3001, not 3000 which is taken by dashboard):
 
 ```yaml
-  # ── otel-collector ──────────────────────────────────────────────────────────
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.95.0
     container_name: aether-otel-collector
     hostname: otel-collector
-    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    command: ["--config=/etc/otel-collector.yaml"]
     volumes:
-      - ./observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ./observability/otel-collector.yaml:/etc/otel-collector.yaml:ro
     ports:
-      - "4317:4317"    # OTLP gRPC receiver
-      - "4318:4318"    # OTLP HTTP receiver
+      - "4317:4317"
+      - "4318:4318"
     networks:
       - aether-net
-    depends_on:
-      - loki
     restart: unless-stopped
 
-  # ── loki ────────────────────────────────────────────────────────────────────
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki:2.9.4
     container_name: aether-loki
     hostname: loki
-    command: ["-config.file=/etc/loki/local-config.yaml"]
+    command: -config.file=/etc/loki/loki.yaml
     volumes:
-      - ./observability/loki.yaml:/etc/loki/local-config.yaml:ro
-      - loki-data:/loki
+      - ./observability/loki.yaml:/etc/loki/loki.yaml:ro
     ports:
-      - "3100:3100"    # Loki HTTP API (direct query access)
+      - "3100:3100"
     networks:
       - aether-net
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
     restart: unless-stopped
 
-  # ── grafana ─────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: aether-prometheus
+    hostname: prometheus
+    volumes:
+      - ./observability/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - aether-net
+    restart: unless-stopped
+
   grafana:
-    image: grafana/grafana:11.0.0
+    image: grafana/grafana:10.3.3
     container_name: aether-grafana
     hostname: grafana
     environment:
+      GF_SERVER_HTTP_PORT: "3001"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
-      GF_AUTH_DISABLE_LOGIN_FORM: "true"
-      GF_FEATURE_TOGGLES_ENABLE: "lokiLive"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
-      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "3001:3000"    # Grafana UI — http://localhost:3001
+      - "3001:3001"
+    depends_on:
+      - loki
+      - prometheus
     networks:
       - aether-net
-    depends_on:
-      loki:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
     restart: unless-stopped
-
-volumes:
-  loki-data:
-  grafana-data:
 ```
 
-> Note: `GF_AUTH_ANONYMOUS_ENABLED=true` gives passwordless access for local development. Remove this for any shared/production deployment.
+---
 
-### 4.3 OTel Collector config
+### Step 10 — Provisioning files under `observability/`
 
-**`observability/otel-collector.yaml`**:
-
+**`observability/otel-collector.yaml`**
 ```yaml
-# OpenTelemetry Collector — Aether log pipeline
-# Receives OTLP from Python containers, exports to Loki.
-# To switch to Datadog: add the datadog exporter below and update the pipeline.
-
 receivers:
   otlp:
     protocols:
@@ -216,453 +449,157 @@ receivers:
 
 processors:
   batch:
-    # Batch log records before exporting to reduce HTTP overhead.
     timeout: 1s
     send_batch_size: 512
-
   resource:
-    # Promote container-level metadata to top-level attributes for Loki labels.
     attributes:
-      - key: service.name
-        action: upsert
-        from_attribute: service.name
+      - action: insert
+        key: service.namespace
+        value: aether
 
 exporters:
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
-    # Map OTel resource + log attributes to Loki stream labels.
-    # Labels are indexed and queryable; keep them low-cardinality.
+    default_labels_enabled:
+      exporter: false
+      job: true
+      level: true
     labels:
       resource:
         service.name: "service_name"
-      attributes:
-        level: ""          # maps log record severity to {level="info"} etc.
-        broker: ""         # BoundLogger context field → {broker="172.18.0.4:5001"}
-        publisher: ""
-        subscriber: ""
-        bootstrap: ""
-
-  # ── Future: Datadog ─────────────────────────────────────────────────────────
-  # Uncomment and set DD_API_KEY in docker-compose environment to switch backends.
-  #
-  # datadog:
-  #   api:
-  #     site: datadoghq.com
-  #     key: ${DD_API_KEY}
-  #   logs:
-  #     enabled: true
+      record:
+        event_type: "event_type"
+        component_type: "component_type"
 
 service:
   pipelines:
     logs:
-      receivers:  [otlp]
+      receivers: [otlp]
       processors: [resource, batch]
-      exporters:  [loki]
-      # exporters: [loki, datadog]   ← run both during a migration window
+      exporters: [loki]
 ```
 
-### 4.4 Loki config
+**`observability/loki.yaml`** — minimal single-node in-process config (no persistent volumes needed for local dev)
 
-**`observability/loki.yaml`**:
-
+**`observability/prometheus.yaml`**
 ```yaml
-# Grafana Loki — minimal single-process config for local deployment.
-# Uses filesystem storage (fine for development; swap to S3/GCS for production).
-
-auth_enabled: false
-
-server:
-  http_listen_port: 3100
-  grpc_listen_port: 9096
-  log_level: warn
-
-common:
-  instance_addr: 127.0.0.1
-  path_prefix: /loki
-  storage:
-    filesystem:
-      chunks_directory: /loki/chunks
-      rules_directory:  /loki/rules
-  replication_factor: 1
-  ring:
-    kvstore:
-      store: inmemory
-
-schema_config:
-  configs:
-    - from: 2024-01-01
-      store:        tsdb
-      object_store: filesystem
-      schema:       v13
-      index:
-        prefix: loki_index_
-        period: 24h
-
-limits_config:
-  reject_old_samples:         true
-  reject_old_samples_max_age: 168h   # 7 days
-  ingestion_rate_mb:          16
-  ingestion_burst_size_mb:    32
-
-compactor:
-  working_directory: /loki/compactor
-  compaction_interval: 10m
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: aether-orchestrator
+    static_configs:
+      - targets: ["orchestrator:9000"]
+    metrics_path: /metrics
 ```
 
-### 4.5 Grafana provisioning
-
-**`observability/grafana/provisioning/datasources/loki.yaml`**:
-
+**`observability/grafana/provisioning/datasources/prometheus.yaml`**
 ```yaml
-# Auto-provisions the Loki datasource on first Grafana start.
-# No manual configuration required.
-
 apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+```
 
+**`observability/grafana/provisioning/datasources/loki.yaml`**
+```yaml
+apiVersion: 1
 datasources:
   - name: Loki
     type: loki
-    uid: loki-aether
+    access: proxy
     url: http://loki:3100
-    isDefault: true
-    version: 1
-    editable: false
-    jsonData:
-      maxLines: 5000
-      derivedFields:
-        # Make msg_id a clickable trace link when tracing is added later.
-        - name: msg_id
-          matcherRegex: '"msg_id":"([^"]+)"'
-          url: ""
-          datasourceUid: ""
 ```
 
-**`observability/grafana/provisioning/dashboards/provider.yaml`**:
-
+**`observability/grafana/provisioning/dashboards/provider.yaml`**
 ```yaml
 apiVersion: 1
-
 providers:
-  - name: Aether
+  - name: aether
     orgId: 1
+    folder: Aether
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30
-    allowUiUpdates: true
     options:
-      path: /etc/grafana/provisioning/dashboards
-```
-
-**`observability/grafana/provisioning/dashboards/aether-logs.json`**:
-
-The pre-built dashboard JSON is generated after first run (see Section 6, Verification). On first launch, the Loki datasource is pre-wired and the Explore page is immediately usable. Useful starter queries to save as a dashboard:
-
-```logql
-# All logs from all Aether containers
-{service_name="aether"}
-
-# Only broker logs
-{service_name="aether", broker!=""}
-
-# Errors and warnings across all components
-{service_name="aether"} | json | level =~ "error|warning"
-
-# Logs for a specific broker
-{broker="172.18.0.4:5001"}
-
-# Follow a message through the system by correlation ID
-{service_name="aether"} | json | msg_id="<uuid>"
-
-# Gossip traffic rate over time (metric query)
-sum(rate({service_name="aether"} | json | logger=~".*gossip.*" [1m]))
+      path: /var/lib/grafana/dashboards
 ```
 
 ---
 
-## 5. Phase 2: Python OTel Integration
+### Step 11 — Grafana dashboards
 
-### 5.1 Config changes
+**`observability/grafana/dashboards/aether-overview.json`**
 
-**`aether/config.py`** — add one field to the `Config` dataclass:
+Panels:
+- Stat: running brokers/publishers/subscribers (`count(aether_component_up{component_type=X} == 1)`)
+- Stat: total recoveries past 24h (`increase(aether_broker_recoveries_total[24h])`)
+- Time series: message publish rate (`rate(aether_messages_published_total[1m])`)
+- Time series: broker peer counts by broker_id
+- Logs: `{job="aether"} | json`
 
-```python
-@dataclass
-class Config:
-    log_level: str = "INFO"
-    log_file: Optional[str] = None
-    log_json_console: bool = False
-    log_otel_endpoint: Optional[str] = None   # ← new
-```
+**`observability/grafana/dashboards/aether-failover.json`**
 
-**`config.docker.yaml`** — add OTel endpoint:
-
-```yaml
-logging:
-  level: INFO
-  log_file: null
-  json_console: true
-  otel_endpoint: "http://otel-collector:4317"   # ← new
-```
-
-`config.yaml` (local/Tailscale mode) — leave `otel_endpoint: null`. OTel is opt-in; local dev is unaffected.
-
-### 5.2 `aether/utils/log.py` changes
-
-Two additions to `setup_logging()`:
-
-1. Accept an `otel_endpoint: Optional[str] = None` parameter.
-2. When set, create an `OTELHandler` and append it to the `handlers` list before starting the `QueueListener`.
-
-```python
-def setup_logging(
-    level: str = "INFO",
-    log_file: Optional[str] = None,
-    json_console: bool = False,
-    otel_endpoint: Optional[str] = None,    # ← new parameter
-) -> None:
-```
-
-New `_make_otel_handler()` helper (add near the top of the module, guarded by a try/import so missing packages don't break local runs):
-
-```python
-def _make_otel_handler(endpoint: str, service_name: str = "aether") -> logging.Handler:
-    """Create a stdlib logging handler that exports records to an OTel Collector.
-
-    Returns a plain NullHandler if the opentelemetry packages are not installed,
-    so that local dev (no OTel) works without changes.
-    """
-    try:
-        from opentelemetry._logs import set_logger_provider
-        from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
-        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-        from opentelemetry.sdk.resources import Resource
-
-        resource = Resource.create({"service.name": service_name})
-        exporter = OTLPLogExporter(endpoint=endpoint, insecure=True)
-        provider = LoggerProvider(resource=resource)
-        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
-        set_logger_provider(provider)
-
-        handler = LoggingHandler(level=logging.DEBUG, logger_provider=provider)
-        return handler
-
-    except ImportError:
-        # opentelemetry packages not installed — silently fall back.
-        return logging.NullHandler()
-```
-
-In `setup_logging()`, after the file handler block and before starting the listener:
-
-```python
-    # -- OTel handler (optional) -------------------------------------------
-    if otel_endpoint:
-        otel_handler = _make_otel_handler(otel_endpoint)
-        otel_handler.setLevel(logging.DEBUG)
-        handlers.append(otel_handler)
-```
-
-### 5.3 CLI entry points
-
-Each CLI entry point calls `setup_logging()` with values from the config. The config loader already reads `log_otel_endpoint` from the YAML. Pass it through:
-
-```python
-# In each cli/*.py main() function — add the new kwarg:
-setup_logging(
-    level=cfg.log_level,
-    log_file=cfg.log_file,
-    json_console=cfg.log_json_console,
-    otel_endpoint=cfg.log_otel_endpoint,   # ← new
-)
-```
-
-Files affected:
-- `aether/cli/admin.py`
-- `aether/cli/distributed_admin.py`
-- `aether/cli/run_bootstrap.py`
-- `aether/cli/run_broker.py`
-- `aether/cli/run_publishers.py`
-- `aether/cli/run_subscribers.py`
-
-### 5.4 What the BoundLogger context fields become in Loki
-
-The `BoundLogger` injects fields like `broker`, `publisher`, `subscriber`, `msg_id` into every log record's `extra` dict. The `OTELHandler` picks these up as log record attributes and forwards them to the Collector. The Collector's Loki exporter config (Section 4.3) then promotes `broker`, `publisher`, `subscriber`, `bootstrap` to Loki **stream labels**, making them first-class filter dimensions in Grafana.
+Panels:
+- Stat: recovery success/failure split by `result` label
+- Time series: recovery duration p50/p95
+- Time series: subscriber reconnect rate
+- Logs: `{job="aether", event_type="broker_declared_dead"} | json`
+- Logs: `{job="aether"} | json | event_type =~ "broker_recovery.*"`
 
 ---
 
-## 6. Phase 3: Grafana Dashboard Setup
+## Critical Files
 
-### 6.1 First launch
-
-```bash
-docker compose up --build
-```
-
-Navigate to `http://localhost:3001`. Grafana opens with no login required (anonymous admin). The Loki datasource is pre-wired. Go to **Explore → Loki** and run:
-
-```logql
-{service_name="aether"}
-```
-
-### 6.2 Recommended dashboard panels
-
-Build a dashboard with these panels and export the JSON to `observability/grafana/provisioning/dashboards/aether-logs.json`:
-
-| Panel | Type | Query |
-|-------|------|-------|
-| **Log stream** | Logs | `{service_name="aether"} \| json` |
-| **Error rate** | Time series | `sum(rate({service_name="aether"} \| json \| level="error" [1m]))` |
-| **Log volume by component** | Bar gauge | `sum by (broker) (rate({broker!=""} [1m]))` |
-| **Broker logs** | Logs | `{broker!=""} \| json` |
-| **Publisher logs** | Logs | `{publisher!=""} \| json` |
-| **Subscriber logs** | Logs | `{subscriber!=""} \| json` |
-| **Message trace** | Logs | `{service_name="aether"} \| json \| msg_id=~".+"` |
-
-### 6.3 Live tail
-
-Grafana Loki supports live tail mode (the "Live" toggle in Explore). With `GF_FEATURE_TOGGLES_ENABLE=lokiLive` set (already in the compose config), you get a real-time log stream in the browser — equivalent to `tail -f` but with labels and filtering.
+| File | Change |
+|---|---|
+| `pyproject.toml` | Add 4 packages |
+| `aether/config.py` | Add `log_otel_endpoint: Optional[str]` |
+| `aether/utils/log.py` | Add `_OTLPHandler`, `otel_endpoint` param |
+| `aether/orchestrator/main.py` | Replace basicConfig, add `/metrics`, add startup updater |
+| `aether/orchestrator/recovery.py` | Add recovery_id, event_type logs, metrics updates |
+| `aether/orchestrator/health.py` | Add event_type logs at failure threshold |
+| `aether/orchestrator/settings.py` | Add `otel_endpoint`, `log_level` |
+| `aether/orchestrator/docker_manager.py` | (no change needed — config.docker.yaml is mounted) |
+| `aether/gossip/broker.py` | Add event_type + snapshot_id to lifecycle logs |
+| `aether/network/subscriber.py` | Add event_type to reconnect log |
+| `aether/network/publisher.py` | Add event_type to send logs |
+| `config.docker.yaml` | Add `otel_endpoint` under logging |
+| `docker-compose.yml` | Add 4 observability services |
+| `aether/orchestrator/metrics.py` | **New** — Prometheus metric singletons |
+| `observability/otel-collector.yaml` | **New** |
+| `observability/loki.yaml` | **New** |
+| `observability/prometheus.yaml` | **New** |
+| `observability/grafana/provisioning/datasources/prometheus.yaml` | **New** |
+| `observability/grafana/provisioning/datasources/loki.yaml` | **New** |
+| `observability/grafana/provisioning/dashboards/provider.yaml` | **New** |
+| `observability/grafana/dashboards/aether-overview.json` | **New** |
+| `observability/grafana/dashboards/aether-failover.json` | **New** |
 
 ---
 
-## 7. Makefile additions
+## Key Gotchas
 
-Add to `Makefile`:
-
-```makefile
-grafana:         ## Open Grafana in browser
-	open http://localhost:3001
-
-logs-live:       ## Live tail all Aether logs in terminal (requires loki running)
-	docker logs -f aether-otel-collector
-
-loki-query:      ## Run a raw LogQL query against Loki (set Q= on the command line)
-	curl -s "http://localhost:3100/loki/api/v1/query_range" \
-		--data-urlencode 'query={service_name="aether"}' \
-		--data-urlencode "start=$$(date -v-5M +%s)000000000" \
-		--data-urlencode "end=$$(date +%s)000000000" \
-		| python3 -m json.tool
-```
+1. **OTel soft import guard** — wrap `_OTLPHandler` class in `try/except ImportError` so missing packages don't break imports in non-Docker dev
+2. **Counter delta tracking** — `messages_published_total` tracks previous total per broker; only increment by positive deltas to handle container restarts resetting counters
+3. **Loki stream cardinality** — do NOT index `recovery_id`, `snapshot_id`, or `msg_id` as stream labels; they go in log attributes queryable with `| json`
+4. **Grafana port 3001** — dashboard already occupies port 3000
+5. **Pin OTel Collector to `0.95.0`** — Loki exporter config schema changed between versions
+6. **`recovery_id` scope** — generate once in `handle_broker_dead`, pass to both `_recover_replacement` and `_recover_redistribution`; one ID spans the whole attempt
+7. **OTLP endpoint URL** — `OTLPLogExporter` in `>=1.20` appends `/v1/logs` automatically; use base URL `http://otel-collector:4318`
+8. **`BoundLogger` vs plain `getLogger` in orchestrator sub-modules** — `recovery.py` and `health.py` use `logging.getLogger(__name__)` because they were written before observability was planned. They're orchestrator-internal service classes with no network address, so they got the plain-logger pattern. `extra={}` dicts on individual log calls supply `event_type` (which the dashboards query), but `service_name` and `component_type` are absent from those records. Fix: add a module-level `BoundLogger` with `{"service_name": "aether-orchestrator", "component_type": "orchestrator"}` to both files — matching the pattern already used in `main.py`.
 
 ---
 
-## 8. Phase 4 (Future): Metrics via OTel
+## Acceptance Criteria
 
-Once the log pipeline is in place, metrics follow naturally. The OTel Collector already supports a `prometheus` exporter, and Grafana has a built-in Prometheus datasource.
-
-Add OTel metric instruments at key points in the Python code:
-
-| Metric | Instrument | Location |
-|--------|-----------|---------|
-| `aether.messages.processed` | Counter | `gossip/broker.py` — each gossip dispatch |
-| `aether.peers.active` | UpDownCounter | `gossip/broker.py` — peer join/evict |
-| `aether.gossip.latency` | Histogram | `network/node.py` — round-trip time |
-| `aether.subscribers.count` | UpDownCounter | `gossip/broker.py` — subscribe/unsubscribe |
-| `aether.publisher.send_rate` | Counter | `network/publisher.py` — each publish |
-
-Add to `otel-collector.yaml`:
-
-```yaml
-exporters:
-  prometheus:
-    endpoint: 0.0.0.0:8889   # scraped by Grafana
-
-service:
-  pipelines:
-    metrics:
-      receivers:  [otlp]
-      processors: [batch]
-      exporters:  [prometheus]
-```
-
----
-
-## 9. Phase 5 (Future): Distributed Tracing
-
-Aether already has the key ingredient: `msg_id`, a UUID that threads through every gossip hop. Promoting this to a proper OTel trace requires:
-
-1. **`aether/gossip/protocol.py`** — add `trace_context: Optional[str] = None` to `GossipMessage`.
-2. **`aether/gossip/broker.py`** — when dispatching a received message:
-   - Extract `trace_context` and restore it via `TraceContextTextMapPropagator.extract()`
-   - Create a child span: `tracer.start_as_current_span("broker.forward")`
-   - Inject new context into outgoing message before forwarding
-3. Add `opentelemetry-exporter-otlp-proto-grpc` traces pipeline to the Collector.
-4. Add Grafana Tempo service to `docker-compose.yml` for trace storage.
-5. Link log `msg_id` to trace ID in the Grafana Loki datasource `derivedFields` config.
-
-Result: click any log line in Grafana → jump to the full distributed trace showing the message's path through every broker hop with per-hop latencies.
-
----
-
-## 10. Migrating to Datadog
-
-When ready to switch backends, the only change is in `observability/otel-collector.yaml`. The Python code, docker-compose services, and application config are **untouched**.
-
-**Step 1**: Add API key to `docker-compose.yml` orchestrator environment (or a `.env` file):
-
-```yaml
-environment:
-  DD_API_KEY: your_key_here
-```
-
-**Step 2**: Update `observability/otel-collector.yaml` exporters + pipeline:
-
-```yaml
-exporters:
-  datadog:
-    api:
-      site: datadoghq.com
-      key: ${DD_API_KEY}
-    logs:
-      enabled: true
-
-service:
-  pipelines:
-    logs:
-      receivers:  [otlp]
-      processors: [resource, batch]
-      exporters:  [datadog]          # ← replace loki with datadog
-      # exporters: [loki, datadog]   # ← or dual-write during migration window
-```
-
-**Step 3**: `docker compose up -d otel-collector`
-
-Logs appear in Datadog Log Management under `service:aether`. The `broker`, `publisher`, `subscriber` labels become Datadog facets automatically.
-
-To switch back: revert the exporter line. No data migration required; Loki's on-disk data is untouched.
-
----
-
-## 11. Verification Checklist
-
-```
-[ ] docker compose up --build
-[ ] http://localhost:3001 loads Grafana with no login
-[ ] Loki datasource is pre-wired (Settings → Data Sources → Loki → Test)
-[ ] Seed demo topology: POST http://localhost:9000/api/seed
-[ ] Explore → Loki → run {service_name="aether"} → log lines appear
-[ ] Verify broker label: {broker!=""} returns only broker logs
-[ ] Verify level filter: {service_name="aether"} | json | level="warning"
-[ ] Run Live tail toggle — confirm real-time streaming
-[ ] Remove a broker via DELETE /api/brokers/1 — verify logs stop for that container
-[ ] docker compose down → docker compose up → verify loki-data volume persists logs
-[ ] (OTel swap test) Comment out loki exporter, uncomment datadog → confirm no Python changes needed
-```
-
----
-
-## 12. Summary of All Files Changed or Created
-
-| File | Status | Change |
-|------|--------|--------|
-| `observability/otel-collector.yaml` | New | OTel pipeline config |
-| `observability/loki.yaml` | New | Loki storage config |
-| `observability/grafana/provisioning/datasources/loki.yaml` | New | Auto-wires Loki in Grafana |
-| `observability/grafana/provisioning/dashboards/provider.yaml` | New | Dashboard file provider |
-| `observability/grafana/provisioning/dashboards/aether-logs.json` | New | Pre-built dashboard (export after first run) |
-| `docker-compose.yml` | Modified | Add otel-collector, loki, grafana services + volumes |
-| `pyproject.toml` | Modified | Add opentelemetry-sdk, opentelemetry-exporter-otlp-proto-grpc |
-| `aether/utils/log.py` | Modified | Add `_make_otel_handler()`, `otel_endpoint` param to `setup_logging()` |
-| `aether/config.py` | Modified | Add `log_otel_endpoint: Optional[str] = None` to `Config` |
-| `config.docker.yaml` | Modified | Add `otel_endpoint: http://otel-collector:4317` |
-| `aether/cli/*.py` (6 files) | Modified | Pass `otel_endpoint` to `setup_logging()` |
-| `Makefile` | Modified | Add `grafana`, `logs-live`, `loki-query` targets |
+1. `docker compose up --build` starts all 7 services cleanly
+2. `curl http://localhost:9000/metrics` returns Prometheus text with `aether_component_up`
+3. Grafana at `http://localhost:3001` opens with dashboards pre-loaded and datasources connected
+4. Killing a broker via chaos button produces:
+   - `aether_broker_recoveries_total` increment in Prometheus
+   - `broker_declared_dead` log in Loki logs panel
+   - Recovery duration metric visible
+5. `pytest tests/unit/test_logging_schema.py` — all 12 tests still pass

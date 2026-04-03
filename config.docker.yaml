@@ -49,3 +49,4 @@ logging:
   level: INFO
   log_file: null
   json_console: true
+  otel_endpoint: http://otel-collector:4318  # resolves on aether-net; null to disable

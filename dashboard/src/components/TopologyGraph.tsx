@@ -30,6 +30,20 @@ function edgePath(src: PositionedNode, tgt: PositionedNode): string {
   return `M ${src.x} ${src.y} L ${tgt.x} ${tgt.y}`;
 }
 
+function freshnessColor(ageSec: number | null): string {
+  if (ageSec === null) return "#e05252";
+  if (ageSec < 30) return "#5ec269";
+  if (ageSec < 90) return "#e0a643";
+  return "#e05252";
+}
+
+function freshnessDasharray(ageSec: number | null, arcR: number): string {
+  const circ = 2 * Math.PI * arcR;
+  if (ageSec === null) return "3 5";
+  const filled = Math.max(0, (1 - ageSec / 90)) * circ;
+  return `${filled} ${circ - filled}`;
+}
+
 /** Renders a single animated edge — the line, flowing dash, and traveling particles. */
 function AnimatedEdge({
   edge,
@@ -161,6 +175,13 @@ function AnimatedEdge({
 export default function TopologyGraph() {
   const topology = useAetherStore((s) => s.topology);
   const chaosState = useAetherStore((s) => s.chaosState);
+  const snapshots = useAetherStore((s) => s.snapshots);
+  const snapshotWave = useAetherStore((s) => s.snapshotWave);
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Date.now() / 1000), 1000);
+    return () => clearInterval(id);
+  }, []);
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const gRef = useRef<SVGGElement>(null);
@@ -408,6 +429,35 @@ export default function TopologyGraph() {
                       </circle>
                     )}
                   </>
+                )}
+
+                {/* Snapshot freshness arc — broker nodes only */}
+                {node.component_type === "broker" && (() => {
+                  const info = snapshots?.brokers.find(s => s.broker_id === node.component_id);
+                  const ageSec = info?.timestamp != null ? nowSec - info.timestamp : null;
+                  const arcR = r + 16;
+                  const circ = 2 * Math.PI * arcR;
+                  return (
+                    <circle
+                      r={arcR}
+                      fill="none"
+                      stroke={freshnessColor(ageSec)}
+                      strokeWidth={1.5}
+                      strokeDasharray={freshnessDasharray(ageSec, arcR)}
+                      strokeDashoffset={circ * 0.25}
+                      opacity={0.55}
+                      style={{ transform: "rotate(-90deg)" }}
+                    />
+                  );
+                })()}
+
+                {/* Snapshot wave ring — pulses on all brokers when a snapshot completes */}
+                {node.component_type === "broker" && snapshotWave && (
+                  <circle r={r + 2} fill="none" stroke="#a78bfa" strokeWidth={2} opacity={0}>
+                    <animate attributeName="r" values={`${r + 2};${r + 28}`} dur="1.4s" begin="0s" fill="freeze" />
+                    <animate attributeName="opacity" values="0;0.75;0" dur="1.4s" begin="0s" fill="freeze" />
+                    <animate attributeName="stroke-width" values="2;0.5" dur="1.4s" begin="0s" fill="freeze" />
+                  </circle>
                 )}
 
                 {/* Label */}
