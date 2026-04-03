@@ -4,16 +4,60 @@ Aether is a distributed pub-sub broker with Chandy-Lamport snapshot recovery —
 
 Built from TCP sockets up: gossip-based message propagation across a broker mesh, consistent global snapshots for fault-tolerant state capture, automatic broker failover with two recovery paths, and a FastAPI orchestration control plane that manages Docker containers on the fly — all with a live React dashboard.
 
-```mermaid
-flowchart LR
-    P[Publisher] --> B1[Broker]
-    B1 <--> B2[Broker]
-    B2 --> S[Subscriber]
-    B1 -. SnapshotMarker .-> B2
-    B2 -. Snapshot replica k=2 .-> B1
+**No external message queue. No Kafka. No Redis. Built from TCP sockets up.**
+
+---
+
+## Recovery Demo
+
+Replace this with your broker recovery GIF or linked video preview:
+
+```md
+[![Broker recovery demo](docs/media/broker-recovery-poster.png)](docs/media/broker-recovery.mp4)
 ```
 
-**No external message queue. No Kafka. No Redis. Built from TCP sockets up.**
+Suggested caption: Kill a broker, watch the orchestrator detect the failure, restore from snapshot or redistribute subscribers, and keep the system live.
+
+---
+
+## Observability Dashboards
+
+Replace these with the two dashboard screenshots you want front and center:
+
+```md
+![Aether System Overview](docs/media/aether-system-overview.png)
+```
+
+Caption: System-wide metrics, component health, throughput, and live operational context in Grafana.
+
+```md
+![Aether Failover and Recovery](docs/media/aether-failover-recovery.png)
+```
+
+Caption: Recovery-focused dashboard for broker failures, recovery path outcomes, durations, and correlated logs.
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/krishmula/aether.git
+cd aether
+make demo
+open http://localhost:3000
+open http://localhost:3001
+```
+
+This builds the Docker images, starts the control plane plus the observability stack, and seeds a topology of **3 brokers, 2 publishers, 3 subscribers**.
+
+- React dashboard: `http://localhost:3000`
+- Grafana: `http://localhost:3001`
+- Orchestrator API docs: `http://localhost:9000/docs`
+
+When you're done:
+```bash
+make clean
+```
 
 ---
 
@@ -25,7 +69,20 @@ flowchart LR
 - **Subscriber Autonomy** — Subscribers detect broker failure independently via Ping/Pong health checks, then query the orchestrator for their new assignment and reconnect with exponential backoff. No thundering herd.
 - **Publisher Resilience** — Publishers track failed brokers and skip them during a 30s cooldown, retrying automatically after expiry.
 - **Dynamic Orchestration** — A FastAPI control plane manages broker/publisher/subscriber containers via the Docker SDK. Spin up or tear down any component with a single API call while the system keeps running.
-- **Fully Observable** — Every component exposes a live JSON `/status` endpoint over HTTP. `BROKER_DECLARED_DEAD`, `BROKER_RECOVERED`, and `SUBSCRIBER_RECONNECTED` events stream over WebSocket in real time.
+- **Observability Stack Included** — Every component exposes `/status`, the orchestrator exposes Prometheus `/metrics`, and structured logs flow through OpenTelemetry Collector → Loki → Grafana with provisioned dashboards for system overview and failover analysis.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    P[Publisher] --> B1[Broker]
+    B1 <--> B2[Broker]
+    B2 --> S[Subscriber]
+    B1 -. SnapshotMarker .-> B2
+    B2 -. Snapshot replica k=2 .-> B1
+```
 
 ---
 
@@ -96,24 +153,6 @@ docker compose version
 
 ---
 
-## Quick Start
-
-```bash
-git clone https://github.com/krishmula/aether.git
-cd aether
-make demo
-open http://localhost:3000
-```
-
-This builds both Docker images, starts the infrastructure, and seeds a topology of **3 brokers, 2 publishers, 3 subscribers**.
-
-When you're done:
-```bash
-make clean
-```
-
----
-
 ## All Setup Modes
 
 ### Mode 1 — Local (single process, no networking)
@@ -160,7 +199,7 @@ make build
 
 ```bash
 make up
-make ps   # verify all three services are healthy
+make ps   # verify bootstrap, orchestrator, dashboard, otel-collector, loki, prometheus, grafana
 ```
 
 #### Step 3 — Create topology
@@ -183,6 +222,7 @@ curl -X POST http://localhost:9000/api/subscribers \
 
 ```bash
 open http://localhost:3000          # React dashboard
+open http://localhost:3001          # Grafana dashboards (anonymous access enabled)
 open http://localhost:9000/docs     # Swagger UI
 curl http://localhost:9000/api/state | python3 -m json.tool
 ```
@@ -280,6 +320,10 @@ In Docker mode, each component keeps a fixed internal port and gets a unique hos
 | **Subscriber** | Receives messages matching its `[low, high]` payload range; detects dead broker via Ping | Container TCP `9100`, HTTP `19100` |
 | **Orchestrator** | FastAPI control plane — health monitoring, recovery decisions, assignment registry | HTTP `9000` |
 | **Dashboard** | React + D3 real-time visualization | HTTP `3000` |
+| **OTel Collector** | Receives OTLP logs from Aether processes and forwards them to Loki | OTLP gRPC `4317`, OTLP HTTP `4318` |
+| **Loki** | Structured log storage and LogQL query engine | HTTP `3100` |
+| **Prometheus** | Scrapes orchestrator `/metrics` for recovery and health metrics | HTTP `9090` |
+| **Grafana** | Pre-provisioned dashboards for metrics, logs, and failover investigation | HTTP `3001` |
 
 ### Message Flow
 
@@ -327,6 +371,47 @@ Open http://localhost:3000 after `make demo` or `make up`.
 
 ---
 
+## Observability
+
+`make demo` and `make up` start the local observability stack alongside Aether:
+
+```text
+Aether processes
+  -> structured JSON logs + OTLP export
+  -> OTel Collector
+  -> Loki
+  -> Grafana
+
+Orchestrator /metrics
+  -> Prometheus
+  -> Grafana
+```
+
+What you get out of the box:
+
+- **Structured logs** from bootstrap, brokers, publishers, subscribers, and the orchestrator.
+- **Stable event types** like `broker_declared_dead`, `broker_recovered`, `subscriber_reconnected`, `snapshot_started`, and `message_published`.
+- **Prometheus metrics** for broker recovery counts, recovery duration, subscriber reassignments, component health, broker peer/subscriber counts, and aggregate published-message throughput.
+- **Provisioned Grafana dashboards** in the `Aether` folder: `Aether System Overview` and `Aether Failover & Recovery`.
+
+Default local endpoints:
+
+| Service | URL |
+|---|---|
+| Grafana | `http://localhost:3001` |
+| Prometheus | `http://localhost:9090` |
+| Loki | `http://localhost:3100` |
+| OTel Collector | `http://localhost:4318` |
+| Orchestrator Prometheus scrape endpoint | `http://localhost:9000/metrics` |
+
+Notes:
+
+- Grafana is provisioned with anonymous viewer access, so there is no login step for the demo.
+- In Docker mode, Aether components export logs to the collector via `logging.otel_endpoint` in [`config.docker.yaml`](/Users/krishna/dev/aether/config.docker.yaml).
+- Loki stream labels stay low-cardinality: `service_name`, `component_type`, and `event_type`. Correlation fields like `recovery_id`, `snapshot_id`, and `msg_id` remain in the log body for LogQL filtering.
+
+---
+
 ## Orchestrator API
 
 Full interactive docs at http://localhost:9000/docs.
@@ -342,6 +427,7 @@ Full interactive docs at http://localhost:9000/docs.
 | `GET` | `/api/state` | Full system state (all components, live status) |
 | `GET` | `/api/state/topology` | Node/edge graph for visualization |
 | `GET` | `/api/metrics` | Aggregated metrics across all brokers |
+| `GET` | `/metrics` | Prometheus scrape endpoint for orchestrator + recovery metrics |
 | `GET` | `/api/assignment` | `?subscriber_id=N` — returns current broker assignment |
 | `POST` | `/api/seed` | Idempotent seed: 3 brokers + 2 publishers + 3 subscribers |
 | `WS` | `/ws/events` | Real-time event stream |
@@ -503,6 +589,8 @@ docs/
 **Backend:** Python 3.13, FastAPI, uvicorn, Pydantic, Docker SDK, standard library TCP/HTTP
 
 **Frontend:** React 19, TypeScript, Vite, D3 (force-directed graphs), Zustand, Tailwind CSS
+
+**Observability:** OpenTelemetry Collector, Loki, Prometheus, Grafana
 
 **Infrastructure:** Docker, Docker Compose, nginx
 

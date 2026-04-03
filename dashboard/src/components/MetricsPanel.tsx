@@ -1,15 +1,7 @@
-import { useEffect, useState } from "react";
 import { useAetherStore } from "../store/useAetherStore";
 
 export default function MetricsPanel() {
   const metrics = useAetherStore((s) => s.metrics);
-  const snapshots = useAetherStore((s) => s.snapshots);
-  const [snapshotExpanded, setSnapshotExpanded] = useState(true);
-  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
-  useEffect(() => {
-    const id = setInterval(() => setNowSec(Date.now() / 1000), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   return (
     <div className="border-r border-border bg-surface p-6 overflow-y-auto flex flex-col">
@@ -66,64 +58,6 @@ export default function MetricsPanel() {
           </table>
         </div>
       )}
-
-      {/* Snapshot inspector */}
-      <div className="mt-5 border-t border-border pt-4">
-        <button
-          className="w-full flex items-center justify-between text-[11px] font-mono uppercase tracking-[0.08em] text-secondary mb-3"
-          onClick={() => setSnapshotExpanded(v => !v)}
-        >
-          <span>Snapshots</span>
-          <span className="text-muted">{snapshotExpanded ? "▾" : "▸"}</span>
-        </button>
-
-        {snapshotExpanded && snapshots && (
-          <table className="w-full text-[11px] font-mono">
-            <thead>
-              <tr className="text-muted">
-                <th className="text-left pb-2 font-normal">broker</th>
-                <th className="text-right pb-2 font-normal">age</th>
-                <th className="text-right pb-2 font-normal">subs</th>
-                <th className="text-right pb-2 font-normal">msgs</th>
-                <th className="text-right pb-2 font-normal">state</th>
-              </tr>
-            </thead>
-            <tbody>
-              {snapshots.brokers.map(s => {
-                const ageSec = s.timestamp != null ? nowSec - s.timestamp : null;
-                const ageStr = ageSec == null ? "—"
-                  : ageSec < 60 ? `${Math.round(ageSec)}s`
-                  : `${Math.round(ageSec / 60)}m`;
-                const ageClass = ageSec == null ? "text-muted"
-                  : ageSec < 30 ? "text-[#5ec269]"
-                  : ageSec < 90 ? "text-[#e0a643]"
-                  : "text-[#e05252]";
-                const msgStr = s.seen_message_count > 1000
-                  ? `${(s.seen_message_count / 1000).toFixed(1)}k`
-                  : String(s.seen_message_count);
-                return (
-                  <tr key={s.broker_id} className="text-secondary">
-                    <td className="text-[#6899f7] py-1">B{s.broker_id}</td>
-                    <td className={`text-right py-1 ${ageClass}`}>{ageStr}</td>
-                    <td className="text-right py-1">{s.subscriber_count}</td>
-                    <td className="text-right py-1">{msgStr}</td>
-                    <td className="text-right py-1 text-muted">{s.snapshot_state}</td>
-                  </tr>
-                );
-              })}
-              {snapshots.brokers.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="text-muted py-2 text-center">no snapshots yet</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        )}
-
-        {snapshotExpanded && !snapshots && (
-          <p className="text-[11px] text-muted font-mono">loading...</p>
-        )}
-      </div>
     </div>
   );
 }

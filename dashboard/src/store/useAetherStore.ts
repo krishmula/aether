@@ -22,6 +22,8 @@ interface AetherState {
   topology: TopologyResponse | null;
   metrics: MetricsResponse | null;
   snapshots: SnapshotsResponse | null;
+  prevTotalMessages: number;
+  throughput: number;
   snapshotWave: boolean;
   events: WebSocketEvent[];
   wsConnected: boolean;
@@ -47,6 +49,8 @@ export const useAetherStore = create<AetherState>((set, get) => ({
   topology: null,
   metrics: null,
   snapshots: null,
+  prevTotalMessages: 0,
+  throughput: 0,
   snapshotWave: false,
   events: [],
   wsConnected: false,
@@ -74,7 +78,15 @@ export const useAetherStore = create<AetherState>((set, get) => ({
   fetchMetrics: async () => {
     try {
       const metrics = await api.getMetrics();
-      set({ metrics });
+      const prev = get().prevTotalMessages;
+      const current = metrics.total_messages_processed;
+      const delta = current - prev;
+      const throughput = prev > 0 ? delta / 2 : 0;
+      set({
+        metrics,
+        prevTotalMessages: current,
+        throughput,
+      });
     } catch (e) {
       console.error("Failed to fetch metrics:", e);
     }
@@ -84,7 +96,9 @@ export const useAetherStore = create<AetherState>((set, get) => ({
     try {
       const snapshots = await api.getSnapshots();
       set({ snapshots });
-    } catch { }
+    } catch {
+      // snapshots endpoint may not be available yet
+    }
   },
 
   refreshAll: async () => {
