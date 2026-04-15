@@ -10,13 +10,11 @@ Built from TCP sockets up: gossip-based message propagation across a broker mesh
 
 ## Recovery Demo
 
-Replace this with your broker recovery GIF or linked video preview:
+<video src="docs/media/Broker-Failover-Demo.mov" controls width="720"></video>
 
-```md
-[![Broker recovery demo](docs/media/broker-recovery-poster.png)](docs/media/broker-recovery.mp4)
-```
+Kill a broker, watch the orchestrator detect the failure, restore from snapshot or redistribute subscribers, and keep the system live.
 
-Suggested caption: Kill a broker, watch the orchestrator detect the failure, restore from snapshot or redistribute subscribers, and keep the system live.
+If the clip does not play in your browser (some setups handle `.mov` poorly), open the file directly: [`Broker-Failover-Demo.mov`](docs/media/Broker-Failover-Demo.mov).
 
 ---
 
