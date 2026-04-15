@@ -14,23 +14,17 @@ Built from TCP sockets up: gossip-based message propagation across a broker mesh
 
 Kill a broker, watch the orchestrator detect the failure, restore from snapshot or redistribute subscribers, and keep the system live.
 
-If the clip does not play in your browser (some setups handle `.mov` poorly), open the file directly: [`Broker-Failover-Demo.mov`](docs/media/Broker-Failover-Demo.mov).
+If the clip does not play in your browser, open the file directly: [`Broker-Failover-Demo.mp4`](docs/media/Broker-Failover-Demo.mp4).
 
 ---
 
 ## Observability Dashboards
 
-Replace these with the two dashboard screenshots you want front and center:
-
-```md
-![Aether System Overview](docs/media/aether-system-overview.png)
-```
+![Aether System Overview](docs/media/Aether-System-Overview.png)
 
 Caption: System-wide metrics, component health, throughput, and live operational context in Grafana.
 
-```md
-![Aether Failover and Recovery](docs/media/aether-failover-recovery.png)
-```
+![Aether Failover and Recovery](docs/media/Aether-Failover-Recovery.png)
 
 Caption: Recovery-focused dashboard for broker failures, recovery path outcomes, durations, and correlated logs.
 
