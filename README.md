@@ -10,6 +10,8 @@ Built from TCP sockets up: gossip-based message propagation across a broker mesh
 
 ## Recovery Demo
 
+https://github.com/user-attachments/assets/636db222-0e92-4669-b4f3-156c45957012
+
 <video src="docs/media/Broker-Failover-Demo.mp4" controls width="720"></video>
 
 Kill a broker, watch the orchestrator detect the failure, restore from snapshot or redistribute subscribers, and keep the system live.
