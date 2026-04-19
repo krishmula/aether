@@ -34,6 +34,18 @@ Caption: Recovery-focused dashboard for broker failures, recovery path outcomes,
 
 ## Quick Start
 
+### One-command install
+
+From an empty directory (requires Git, Docker with Compose, `make`, `curl`, `python3`, and `lsof`; macOS, Linux, or WSL2):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/krishmula/aether/main/installaether.sh | bash
+```
+
+This clones into `./aether` (override with `AETHER_DIR`), checks out `main` (override with `AETHER_REF` or `bash installaether.sh -b <ref>`), then runs `make demo`. To review before executing: save [`installaether.sh`](installaether.sh) and run `bash installaether.sh`. See the script header for flags and environment variables.
+
+### Manual clone
+
 ```bash
 git clone https://github.com/krishmula/aether.git
 cd aether
@@ -49,9 +61,12 @@ This builds the Docker images, starts the control plane plus the observability s
 - Orchestrator API docs: `http://localhost:9000/docs`
 
 When you're done:
+
 ```bash
 make clean
 ```
+
+If you used the one-command installer, run `make clean` from inside `./aether` (or your `AETHER_DIR`).
 
 ---
 
