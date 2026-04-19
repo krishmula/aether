@@ -160,12 +160,31 @@ class BrokerMetrics(BaseModel):
     snapshot_state: str = "idle"  # "idle" | "recording"
 
 
+class LatencyPercentiles(BaseModel):
+    p50: float = 0
+    p95: float = 0
+    p99: float = 0
+    sample_count: int = 0
+
+
+class SubscriberMetrics(BaseModel):
+    subscriber_id: int
+    broker_id: int | None = None
+    total_received: int = 0
+    latency_us: LatencyPercentiles = Field(default_factory=LatencyPercentiles)
+
+
 class MetricsResponse(BaseModel):
     brokers: list[BrokerMetrics] = Field(default_factory=list)
+    subscribers: list[SubscriberMetrics] = Field(default_factory=list)
     total_messages_processed: int = 0
     total_brokers: int = 0
     total_publishers: int = 0
     total_subscribers: int = 0
+    throughput_msgs_per_sec: float = 0
+    topology_generation: int = 0
+    fetched_at: float = 0
+    sample_interval_seconds: float = 0
 
 
 class SnapshotStatusResponse(BaseModel):

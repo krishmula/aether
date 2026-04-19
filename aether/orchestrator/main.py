@@ -365,20 +365,18 @@ async def _snapshot_monitor() -> None:
                             "broker_address": s.broker_address,
                             "snapshot_id": s.snapshot_id,
                             "subscriber_count": s.subscriber_count,
+                            "snapshot_timestamp": s.timestamp,
                         })
         except Exception:
             pass
 
 
 async def _metrics_updater() -> None:
-    """Background task that keeps Prometheus gauges and counters current.
+    """Background task that authoritatively samples live metrics.
 
-    Runs every 15 seconds. Piggybacks on docker_mgr.get_metrics(), which
-    already polls every running broker's /status endpoint for the /api/metrics
-    REST response — so this task adds no extra broker calls.
-
-    Why 5 seconds: matches Prometheus's scrape_interval so gauges are always
-    fresh by the time Prometheus pulls them.
+    This is the only path allowed to refresh orchestrator metrics from live
+    broker/subscriber status endpoints. ``GET /api/metrics`` serves the latest
+    cached snapshot produced here and must remain a passive read.
 
     Counter delta strategy for messages_published_total:
       Broker /status returns a cumulative count since that container started.
@@ -397,11 +395,12 @@ async def _metrics_updater() -> None:
     # of 1 indefinitely and the running-count panels never decrease.
     _seen_components: set[tuple[str, str]] = set()
 
-    _POLL_INTERVAL = 5.0
+    _POLL_INTERVAL = 1.0
 
     while True:
-        await asyncio.sleep(_POLL_INTERVAL)
         try:
+            broker_metrics = docker_mgr.refresh_metrics_cache()
+
             # --- Component up/down gauges -----------------------------------
             current_components: set[tuple[str, str]] = set()
             for info in docker_mgr._components.values():
@@ -422,8 +421,6 @@ async def _metrics_updater() -> None:
             _seen_components = current_components
 
             # --- Broker-level gauges + message counter ----------------------
-            broker_metrics = docker_mgr.get_metrics()
-
             for bm in broker_metrics.brokers:
                 bid = str(bm.broker_id)
                 metrics.broker_peer_count.labels(broker_id=bid).set(bm.peer_count)
@@ -446,6 +443,7 @@ async def _metrics_updater() -> None:
             # mid-restart shouldn't break the metrics loop. The next iteration
             # will pick up fresh values.
             logger.debug("metrics updater poll failed (non-critical)")
+        await asyncio.sleep(_POLL_INTERVAL)
 
 
 @app.get("/api/assignments")
