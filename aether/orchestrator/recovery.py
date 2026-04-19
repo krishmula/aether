@@ -5,6 +5,7 @@ import uuid
 
 import httpx
 
+from aether.orchestrator import metrics
 from aether.orchestrator.models import (
     ComponentInfo,
     ComponentStatus,
@@ -12,7 +13,6 @@ from aether.orchestrator.models import (
     CreateBrokerRequest,
     EventType,
 )
-from aether.orchestrator import metrics
 from aether.utils.log import BoundLogger
 
 logger = BoundLogger(
@@ -30,6 +30,18 @@ class RecoveryManager:
             int, float
         ] = {}  # broker_id → timestamp (debounce)
         self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _snapshot_subscriber_count(snapshot: dict | None) -> int:
+        """Best-effort count of subscribers captured in a serialized snapshot."""
+        if not snapshot:
+            return 0
+
+        remote_subscribers = snapshot.get("remote_subscribers")
+        if isinstance(remote_subscribers, dict):
+            return len(remote_subscribers)
+
+        return 0
 
     async def handle_broker_dead(self, broker_id: int, host: str, port: int) -> None:
         now = time.time()
@@ -81,7 +93,10 @@ class RecoveryManager:
                     and (now - snapshot["timestamp"]) < self._settings.snapshot_max_age
                 ):
                     logger.info(
-                        "fresh snapshot found (%.1fs old) — attempting replacement recovery",
+                        (
+                            "fresh snapshot found (%.1fs old) "
+                            "— attempting replacement recovery"
+                        ),
                         now - snapshot["timestamp"],
                     )
                     try:
@@ -97,7 +112,10 @@ class RecoveryManager:
                             recovery_path="replacement", result="failure"
                         ).inc()
                         logger.exception(
-                            "replacement recovery failed for broker %d — falling back to redistribution",
+                            (
+                                "replacement recovery failed for broker %d "
+                                "— falling back to redistribution"
+                            ),
                             broker_id,
                             extra={
                                 "event_type": "broker_recovery_failed",
@@ -142,7 +160,7 @@ class RecoveryManager:
         dead_host: str,
         dead_port: int,
     ) -> dict | None:
-        """Query all surviving brokers for snapshots of the dead broker, return the freshest."""
+        """Query surviving brokers and return the freshest snapshot available."""
         if not alive_brokers:
             return None
 
@@ -181,7 +199,7 @@ class RecoveryManager:
         recovery_id: str,
         t0: float,
     ) -> None:
-        """Path A: spin up a replacement broker with the same ID and restore from snapshot."""
+        """Path A: replace the dead broker and restore it from a snapshot."""
         logger.info(
             "broker %d replacement recovery started",
             broker_id,
@@ -239,7 +257,10 @@ class RecoveryManager:
 
         if not healthy:
             raise RuntimeError(
-                f"Replacement broker {broker_id} did not become healthy within {self._settings.health_timeout}s"
+                (
+                    f"Replacement broker {broker_id} did not become healthy within "
+                    f"{self._settings.health_timeout}s"
+                )
             )
 
         # 5. POST /recover to restore state from the dead broker's snapshot
@@ -261,6 +282,9 @@ class RecoveryManager:
             recovery_path="replacement", result="success"
         ).inc()
         metrics.recovery_duration_seconds.observe(time.time() - t0)
+        metrics.subscriber_reconnects_total.inc(
+            self._snapshot_subscriber_count(snapshot)
+        )
 
         logger.info(
             "broker %d replacement recovery complete",
@@ -474,4 +498,5 @@ class RecoveryManager:
             broker_id,
             len(orphaned_subscribers),
         )
+        metrics.subscriber_reconnects_total.inc(len(orphaned_subscribers))
         return len(orphaned_subscribers)

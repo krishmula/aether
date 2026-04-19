@@ -28,6 +28,10 @@ dev = [
     "mypy>=1.8.0",
     "types-PyYAML>=6.0"
 ]
+benchmark = [
+    "matplotlib>=3.8.0",
+    "websockets>=12.0",
+]
 
 [project.scripts]
 aether-admin = "aether.cli.admin:main"

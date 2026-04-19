@@ -49,6 +49,11 @@ Thumbs.db
 
 # Claude / project-local files
 .claude/
+.opencode/
 CLAUDE.md
 config.yaml
 config-local.yaml
+
+# Generated benchmark outputs
+benchmarks/results/*
+!benchmarks/results/.gitkeep

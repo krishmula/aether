@@ -113,7 +113,8 @@ class _StatusHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ #
 
     def _handle_recover(self) -> None:
-        # Parse JSON body — RecoveryManager sends {"dead_broker_host": ..., "dead_broker_port": ...}
+        # RecoveryManager sends:
+        # {"dead_broker_host": ..., "dead_broker_port": ...}
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
@@ -362,11 +363,31 @@ class _SubscriberStatusHandler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "not found"}, status=404)
 
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path == "/latency/reset":
+            self._handle_latency_reset()
+        else:
+            self._send_json({"error": "not found"}, status=404)
+
     def _handle_status(self) -> None:
         sub = self.subscriber
         now = time.time()
 
         uptime = round(now - sub._start_time, 1)
+
+        # Compute latency percentiles from collected samples.
+        samples = sorted(sub.latency_samples_snapshot_ns())
+        latency_samples_us = [round(sample / 1000, 1) for sample in samples]
+        if samples:
+            n = len(samples)
+            latency_us: dict[str, float | int] = {
+                "p50": round(samples[n // 2] / 1000, 1),
+                "p95": round(samples[int(n * 0.95)] / 1000, 1),
+                "p99": round(samples[int(n * 0.99)] / 1000, 1),
+                "sample_count": n,
+            }
+        else:
+            latency_us = {"p50": 0, "p95": 0, "p99": 0, "sample_count": 0}
 
         payload: dict[str, Any] = {
             "subscriber": str(sub.address),
@@ -380,9 +401,18 @@ class _SubscriberStatusHandler(BaseHTTPRequestHandler):
             "total_received": sub.total_received,
             "running": sub.running,
             "uptime_seconds": uptime,
+            "latency_us": latency_us,
+            "latency_samples_us": latency_samples_us,
         }
 
         self._send_json(payload, status=200)
+
+    def _handle_latency_reset(self) -> None:
+        cleared = self.subscriber.clear_latency_samples()
+        self._send_json(
+            {"status": "ok", "cleared_samples": cleared},
+            status=200,
+        )
 
     def _send_json(self, data: dict, *, status: int) -> None:
         body = json.dumps(data, indent=2).encode("utf-8")

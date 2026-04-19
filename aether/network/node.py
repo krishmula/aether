@@ -150,7 +150,7 @@ class NetworkNode:
                     self._connections[peer_address] = peer_socket
 
             while self._running:
-                data = self._recv_full_message(peer_socket)
+                data = self._recv_full_message_persistent(peer_socket)
                 if data is None:
                     break
 
@@ -187,7 +187,11 @@ class NetworkNode:
                 pass
 
     def _recv_full_message(self, sock: socket.socket) -> Optional[bytes]:
-        """Receive complete message with length prefix."""
+        """Receive complete message with length prefix.
+
+        Used only for the initial identification handshake where a socket
+        timeout means the peer never identified itself and should be dropped.
+        """
         try:
             length_data = self._recv_exactly(sock, 4)
             if length_data is None:
@@ -200,8 +204,28 @@ class NetworkNode:
             self.log.debug("error receiving message", exc_info=True)
             return None
 
+    def _recv_full_message_persistent(self, sock: socket.socket) -> Optional[bytes]:
+        """Receive complete message, treating socket.timeout as a poll not an error.
+
+        Used by long-lived connection handlers after the handshake.  A timeout
+        means the peer was quiet for the poll interval — not that it died.  The
+        caller should check self._running after a None return to decide whether
+        to keep looping or exit.  Returns None only on genuine EOF or hard error.
+        """
+        try:
+            length_data = self._recv_exactly_persistent(sock, 4)
+            if length_data is None:
+                return None
+
+            message_length = int.from_bytes(length_data, byteorder="big")
+            return self._recv_exactly_persistent(sock, message_length)
+
+        except Exception:
+            self.log.debug("error receiving message (persistent)", exc_info=True)
+            return None
+
     def _recv_exactly(self, sock: socket.socket, num_bytes: int) -> Optional[bytes]:
-        """Receive exactly num_bytes."""
+        """Receive exactly num_bytes.  Returns None on timeout, EOF, or error."""
         data = b""
         while len(data) < num_bytes:
             try:
@@ -211,6 +235,30 @@ class NetworkNode:
                 data += chunk
             except socket.timeout:
                 return None
+            except Exception:
+                return None
+        return data
+
+    def _recv_exactly_persistent(
+        self, sock: socket.socket, num_bytes: int
+    ) -> Optional[bytes]:
+        """Receive exactly num_bytes, looping through socket.timeout.
+
+        socket.timeout is treated as a poll interval so the 5 s socket timeout
+        does not cause the read loop to mistake a quiet-but-alive peer for a
+        dead one.  Returns None only on EOF or hard error.
+        """
+        data = b""
+        while len(data) < num_bytes:
+            if not self._running:
+                return None
+            try:
+                chunk = sock.recv(num_bytes - len(data))
+                if not chunk:   # EOF — peer closed the connection
+                    return None
+                data += chunk
+            except socket.timeout:
+                continue        # peer was quiet; keep waiting
             except Exception:
                 return None
         return data
@@ -314,7 +362,7 @@ class NetworkNode:
         """Handle receiving from an outbound connection."""
         try:
             while self._running:
-                data = self._recv_full_message(peer_socket)
+                data = self._recv_full_message_persistent(peer_socket)
                 if data is None:
                     break
 

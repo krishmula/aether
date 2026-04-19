@@ -4,6 +4,7 @@ import random
 import threading
 import time
 import urllib.request
+from collections import deque
 from typing import Optional, Set
 
 from aether.core.message import Message
@@ -47,6 +48,8 @@ class NetworkSubscriber:
         "_last_pong_time",
         "_ping_sequence",
         "_health_thread",
+        "_latency_samples_ns",
+        "_latency_samples_lock",
     )
 
     def __init__(
@@ -76,6 +79,8 @@ class NetworkSubscriber:
         self._broker_alive: bool = True
         self._last_pong_time: float = time.time()
         self._ping_sequence: int = 0
+        self._latency_samples_ns: deque[int] = deque(maxlen=10_000)
+        self._latency_samples_lock = threading.Lock()
 
     def connect_to_broker(self, broker_address: NodeAddress) -> None:
         self.broker = broker_address
@@ -117,6 +122,16 @@ class NetworkSubscriber:
 
     def handle_incoming_message(self, msg: Message) -> None:
         self.subscriber.handle_msg(msg)
+
+    def latency_samples_snapshot_ns(self) -> list[int]:
+        with self._latency_samples_lock:
+            return list(self._latency_samples_ns)
+
+    def clear_latency_samples(self) -> int:
+        with self._latency_samples_lock:
+            cleared = len(self._latency_samples_ns)
+            self._latency_samples_ns.clear()
+            return cleared
 
     def unsubscribe(self, payload_range: PayloadRange, retries: int = 3) -> bool:
         if self.broker is None:
@@ -168,9 +183,10 @@ class NetworkSubscriber:
 
         if self.broker == old_broker:
             self.log.info(
-                "broker recovered: %s -> %s, updating reference",
+                "broker recovery notification received: %s -> %s",
                 old_broker,
                 new_broker,
+                extra={"event_type": "subscriber_reconnected"},
             )
             self.broker = new_broker
             self._broker_alive = True
@@ -222,6 +238,11 @@ class NetworkSubscriber:
             if isinstance(msg, PayloadMessageDelivery):
                 self.total_received += 1
                 self.subscriber.handle_msg(msg.msg)
+                if msg.send_timestamp_ns > 0:
+                    with self._latency_samples_lock:
+                        self._latency_samples_ns.append(
+                            time.monotonic_ns() - msg.send_timestamp_ns
+                        )
                 self.log.info(
                     "received payload=%d from broker %s", msg.msg.payload, sender
                 )

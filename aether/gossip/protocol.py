@@ -16,6 +16,7 @@ class GossipMessage:
     msg_id: str
     ttl: int
     source: NodeAddress
+    send_timestamp_ns: int = 0
 
 
 @dataclass
@@ -84,3 +85,4 @@ class PayloadMessageDelivery:
     """
 
     msg: Message
+    send_timestamp_ns: int = 0

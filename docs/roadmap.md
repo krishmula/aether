@@ -1069,98 +1069,145 @@ dashboard:
 
 ---
 
-## Phase 4: Benchmarking & Metrics (Days 26–30)
+## Phase 4: Benchmarking & Metrics
 
-**Goal:** Generate real performance numbers you can put on your resume.
+**Goal:** Generate real performance numbers that make distributed systems engineers stop and read twice. Quantify every dimension of the system — throughput, latency, snapshot coordination, failover recovery, and scaling limits.
 
-### 4.1 — Benchmark Script
+### 4.1 — Instrument the Gossip Pipeline for Latency Measurement
 
-```python
-# benchmarks/throughput_test.py
-"""
-Measures:
-- Messages per second (throughput) at varying broker/publisher counts
-- End-to-end latency (publisher send → subscriber receive) at p50, p95, p99
-- Snapshot completion time (initiation → all brokers finished)
-- Message loss rate under load
-"""
+End-to-end latency requires timestamps flowing through the actual code path, not a synthetic side-channel. All Docker containers share the host kernel's `CLOCK_MONOTONIC`, so `time.monotonic_ns()` is valid across containers.
 
-import time
-import statistics
+**Changes to existing files:**
 
-class BenchmarkRunner:
-    def __init__(self, orchestrator_url="http://localhost:9000"):
-        self.api = orchestrator_url
+| File | Change |
+|---|---|
+| `aether/gossip/protocol.py` | Add `send_timestamp_ns: int = 0` to `GossipMessage` and `PayloadMessageDelivery` dataclasses. Default 0 means non-benchmark traffic is unaffected. |
+| `aether/network/publisher.py` | In `publish()`, set `gossip_msg.send_timestamp_ns = time.monotonic_ns()` before sending |
+| `aether/gossip/broker.py` | Thread `send_timestamp_ns` through `_deliver_to_remote_subscribers()` into the `PayloadMessageDelivery` constructor |
+| `aether/network/subscriber.py` | Add `_latency_samples_ns: deque` (capped at 10k). In `_receive_loop()`, when receiving `PayloadMessageDelivery` with `send_timestamp_ns > 0`, compute and store the delta |
+| `aether/gossip/status.py` | Expose `latency_us: {p50, p95, p99, sample_count}` in subscriber `/status` response |
 
-    def throughput_test(self, num_brokers=3, num_publishers=5, num_subscribers=5,
-                        duration_seconds=60, messages_per_second=1000):
-        """
-        Ramp up system, publish at target rate, measure actual throughput.
-        """
-        # 1. Set up topology via orchestrator API
-        # 2. Start publishers at target rate
-        # 3. Measure subscriber receive rate over duration
-        # 4. Calculate throughput, loss rate
-        ...
+### 4.2 — Benchmark Suite (`benchmarks/`)
 
-    def latency_test(self, num_brokers=3, num_messages=10000):
-        """
-        Embed timestamps in messages, measure delivery latency.
-        """
-        # Publisher embeds send_timestamp in message payload
-        # Subscriber records receive_timestamp
-        # Calculate deltas, compute percentiles
-        ...
-
-    def snapshot_benchmark(self, num_brokers_range=[3, 5, 10, 20]):
-        """
-        Measure snapshot completion time as broker count scales.
-        """
-        # For each broker count:
-        #   1. Set up topology
-        #   2. Start message flow
-        #   3. Trigger snapshot, measure time to completion
-        ...
-
-    def scaling_test(self):
-        """
-        Gradually increase publishers and measure throughput ceiling.
-        """
-        # Start with 1 publisher, increase to 50
-        # Plot throughput vs publisher count
-        # Find saturation point
-        ...
+```
+benchmarks/
+  __init__.py
+  config.py          # All knobs in one dataclass
+  client.py          # Async httpx wrapper around orchestrator REST API + WebSocket
+  collectors.py      # Metric collection from /status and /api/metrics endpoints
+  charts.py          # matplotlib chart generation (dark theme)
+  runner.py          # CLI: python -m benchmarks.runner [throughput|latency|recovery|snapshot|scaling|--charts-only]
+  throughput.py      # Throughput benchmark
+  latency.py         # Latency benchmark
+  snapshot.py        # Snapshot coordination timing
+  recovery.py        # Recovery benchmark (crown jewel)
+  scaling.py         # Scaling / saturation benchmark
+  results/           # JSON results + PNG charts
 ```
 
-### 4.2 — Timestamp Embedding for Latency
+### 4.3 — Throughput Benchmark
 
-Modify your publisher to embed `send_timestamp` in the message payload. Modify your subscriber to compute `receive_timestamp - send_timestamp`. This gives you end-to-end latency. Important: use `time.monotonic_ns()` for same-machine tests, or embed UTC timestamps if testing across actual machines.
+For each `(broker_count, publisher_count)` in `[3,5,7,10] × [1,2,3,5,8]`:
+1. Set up topology via orchestrator API, wait for warmup (10s)
+2. Poll `GET /api/metrics` at 1s intervals for 30s — `messages_processed` on brokers is already deduped
+3. Compute msgs/sec as delta/elapsed for each interval
+4. Report: mean, p50, p95, max throughput
 
-### 4.3 — Target Numbers to Aim For
+**Output:** `results/throughput.json`
 
-These are rough targets that would look good on a resume. Actual results depend on your hardware and implementation:
+### 4.4 — Latency Benchmark
 
-| Metric                    | Target        | Resume-Worthy                            |
-| ------------------------- | ------------- | ---------------------------------------- |
-| Throughput (3 brokers)    | 5,000+ msg/s  | "Sustained 5K+ messages/second"          |
-| Throughput (10 brokers)   | 10,000+ msg/s | "Scaled to 10K+ msg/s across 10 brokers" |
-| Latency p50               | < 5ms         | "Sub-5ms median delivery latency"        |
-| Latency p99               | < 50ms        | "< 50ms p99 latency"                     |
-| Snapshot time (3 brokers) | < 100ms       | "Consistent snapshots in < 100ms"        |
-| Message loss              | 0%            | "Zero-loss guaranteed delivery"          |
+1. Set up standard topology (3 brokers, 2 publishers, 3 subscribers)
+2. Wait 30s for latency samples to accumulate in subscriber deques
+3. Harvest `latency_us` from all subscriber `/status` endpoints
+4. Aggregate all samples, compute p50/p95/p99/max
 
-Even if your numbers are lower, having real numbers at all puts you ahead of 95% of applicants.
+**Output:** `results/latency.json`
 
-### 4.4 — Generate Charts
+### 4.5 — Snapshot Coordination Benchmark
 
-Use matplotlib to generate performance charts. Include them in your README:
+For each broker count in `[3, 5, 7, 10]`:
+1. Set up topology, connect to `ws://localhost:9000/ws/events`
+2. Observe `SNAPSHOT_COMPLETE` events (auto-fire every 15s), collect 3-5 rounds
+3. Per round: time delta between first and last broker's `SNAPSHOT_COMPLETE` event = coordination overhead
+4. Report: mean, min, max snapshot completion time per broker count
 
-- Throughput vs. number of brokers (line chart)
-- Latency distribution (histogram with p50/p99 lines)
-- Snapshot completion time vs. broker count (line chart)
-- Throughput over time during a scaling test (line chart showing ramp-up)
+**Output:** `results/snapshot.json`
 
-**Deliverable:** A `benchmarks/` directory with runnable benchmark scripts and generated charts. Real, measurable performance numbers ready for your resume and README.
+### 4.6 — Recovery Benchmark (Crown Jewel)
+
+Run 5 trials for statistical significance:
+1. Set up topology, let system stabilize, record pre-chaos message counts
+2. `POST /api/chaos` — kill a random broker
+3. Capture WebSocket event timestamps:
+   - `BROKER_DECLARED_DEAD` → t_dead
+   - `BROKER_RECOVERY_STARTED` → t_start + recovery_path (Path A or B)
+   - `BROKER_RECOVERED` → t_recovered
+   - `SUBSCRIBER_RECONNECTED` → t_reconnected (per subscriber)
+4. Compute per trial:
+   - **Detection time:** t_start - t_dead
+   - **Recovery time:** t_recovered - t_start
+   - **Total failover time:** t_recovered - t_dead
+   - **Subscriber reconnection time:** max(t_reconnected) - t_dead
+   - **Message loss estimate:** compare pre/post `total_received` across subscribers
+5. Control recovery path by timing chaos relative to last snapshot (immediate = Path A, wait >30s = Path B)
+
+**Output:** `results/recovery.json` with per-trial breakdown and summary statistics split by Path A vs Path B
+
+### 4.7 — Scaling / Saturation Benchmark
+
+1. Start with 3 brokers, 1 publisher, 3 subscribers
+2. Every 20s, add 1 publisher via `POST /api/publishers`
+3. Continuously measure throughput (poll every 1s)
+4. Scale up to 10 publishers
+5. Find the saturation point (where adding publishers stops increasing throughput)
+
+**Output:** `results/scaling.json`
+
+### 4.8 — Chart Generation
+
+6 PNG charts using matplotlib with a dark theme (#0a0a0f background, cyan/green accents):
+
+1. **Throughput vs. Brokers** — line chart, one line per publisher count
+2. **Throughput vs. Publishers** — scaling curve with saturation annotation
+3. **Latency Distribution** — histogram with vertical p50/p95/p99 markers
+4. **Snapshot Time vs. Brokers** — line with min/max error bars
+5. **Recovery Timeline** — horizontal stacked bar: detection → recovery → reconnection, Path A vs Path B
+6. **Scaling Curve** — throughput over time as publishers ramp, saturation point annotated
+
+Charts regenerable from JSON without re-running benchmarks: `make benchmark-charts`
+
+### 4.9 — Target Numbers
+
+| Metric | Target | Resume Line |
+|---|---|---|
+| Throughput (3 brokers) | 5,000+ msg/s | "Sustained 5K+ msg/s across 3-broker gossip mesh" |
+| Throughput (10 brokers) | 10,000+ msg/s | "Scaled to 10K+ msg/s across 10 brokers" |
+| Latency p50 | < 5ms | "Sub-5ms median end-to-end delivery latency" |
+| Latency p99 | < 50ms | "< 50ms p99 latency under load" |
+| Snapshot (3 brokers) | < 100ms | "Chandy-Lamport snapshots complete in < 100ms" |
+| Recovery Path A | < 5s | "Broker failover with state restoration in < 5s" |
+| Recovery Path B | < 3s | "Subscriber redistribution completes in < 3s" |
+| Message loss | 0% steady-state | "Zero message loss under normal operation" |
+
+Even if actual numbers differ — having real, measured numbers with percentile breakdowns puts you ahead of 95% of candidates.
+
+### 4.10 — Makefile & Dependencies
+
+```makefile
+benchmark:         ## Run full benchmark suite (requires: make demo)
+	python -m benchmarks.runner
+
+benchmark-charts:  ## Regenerate charts from existing results
+	python -m benchmarks.runner --charts-only
+```
+
+Add to `pyproject.toml` as optional `[project.optional-dependencies]` benchmark group:
+- `matplotlib` — chart generation
+- `httpx` — async HTTP client
+- `websockets` — WebSocket client for event streaming
+
+**Deliverable:** A `benchmarks/` directory with 5 runnable benchmarks, 6 auto-generated charts, and JSON results. Real, measured performance data with percentile breakdowns ready for README and resume.
 
 ---
 
