@@ -71,13 +71,15 @@ recovery_duration_seconds = Histogram(
 
 subscriber_reconnects_total = Counter(
     "aether_subscriber_reconnects_total",
-    # What it counts: subscriber reassignments triggered by the orchestrator
-    # during redistribution recovery. Each subscriber moved to a new broker
-    # increments this by 1. This is a control-plane view — it only counts
-    # reconnects the orchestrator orchestrated, not self-healed reconnects
-    # that subscribers negotiated directly (those are visible in Loki via
-    # event_type="subscriber_reconnected").
-    "Total subscriber reassignments performed by the orchestrator during recovery.",
+    # What it counts: subscriber reconnection activity during broker recovery
+    # and reassignment. Redistribution increments this once per orphan moved;
+    # replacement increments it once per subscriber restored from snapshot;
+    # intentional broker deletion uses the same accounting as redistribution.
+    #
+    # This remains a control-plane view — it counts the subscribers affected by
+    # recovery, while Loki's event_type="subscriber_reconnected" logs show the
+    # subscriber-side confirmation that connectivity was restored.
+    "Total subscribers affected by recovery-driven reconnection or reassignment.",
 )
 
 # ---------------------------------------------------------------------------
@@ -89,7 +91,8 @@ component_up = Gauge(
     # What it tracks: 1 if the component container is in RUNNING state according
     # to the orchestrator's DockerManager, 0 otherwise. Updated every 15 seconds
     # by the background metrics updater in main.py.
-    # Use this to build alerts: alert when sum(aether_component_up{component_type="broker"}) < 2.
+    # Use this to build alerts:
+    # alert when sum(aether_component_up{component_type="broker"}) < 2.
     "Whether a managed component is currently running (1 = up, 0 = down).",
     ["component_type", "component_id"],  # e.g. broker/1, subscriber/3
 )
@@ -127,6 +130,8 @@ messages_published_total = Counter(
     # resets (e.g. broker container restart) won't inflate the count, but may
     # cause a small gap. For precise per-message accounting, use Loki with
     # event_type="message_published" instead.
-    "Cumulative messages processed across all brokers (approximated from /status polling).",
+    (
+        "Cumulative messages processed across all brokers "
+        "(approximated from /status polling)."
+    ),
 )
-

@@ -164,7 +164,8 @@ class TestPathBStaleSnapshot(unittest.IsolatedAsyncioTestCase):
 
         await recovery.handle_broker_dead(2, "broker-2", 8000)
 
-        recovery._recover_redistribution.assert_called_once_with(2)
+        recovery._recover_redistribution.assert_awaited_once()
+        self.assertEqual(recovery._recover_redistribution.await_args.args[0], 2)
 
 
 class TestPathBNoSnapshot(unittest.IsolatedAsyncioTestCase):
@@ -185,7 +186,8 @@ class TestPathBNoSnapshot(unittest.IsolatedAsyncioTestCase):
 
         await recovery.handle_broker_dead(2, "broker-2", 8000)
 
-        recovery._recover_redistribution.assert_called_once_with(2)
+        recovery._recover_redistribution.assert_awaited_once()
+        self.assertEqual(recovery._recover_redistribution.await_args.args[0], 2)
 
 
 class TestPathAFallbackToB(unittest.IsolatedAsyncioTestCase):
@@ -212,7 +214,8 @@ class TestPathAFallbackToB(unittest.IsolatedAsyncioTestCase):
         await recovery.handle_broker_dead(2, "broker-2", 8000)
 
         recovery._recover_replacement.assert_called_once()
-        recovery._recover_redistribution.assert_called_once_with(2)
+        recovery._recover_redistribution.assert_awaited_once()
+        self.assertEqual(recovery._recover_redistribution.await_args.args[0], 2)
 
 
 class TestRedistributionBalancing(unittest.IsolatedAsyncioTestCase):
@@ -238,7 +241,7 @@ class TestRedistributionBalancing(unittest.IsolatedAsyncioTestCase):
         settings = _mock_settings()
 
         recovery = RecoveryManager(docker_mgr, broadcaster, settings)
-        await recovery._recover_redistribution(3)
+        await recovery._recover_redistribution(3, "recovery-123", time.time())
 
         # broker2 had 0 subs, broker1 had 1 — least-loaded first
         # Expected: orphan1 → broker2 (0), orphan2 → broker1 (1) or broker2 (1),
@@ -254,6 +257,66 @@ class TestRedistributionBalancing(unittest.IsolatedAsyncioTestCase):
         # With 1 existing on broker1, final counts should be balanced: 2 and 2
         self.assertIn(assigned_to_1 + 1, [2, 2])  # broker1 total
         self.assertIn(assigned_to_2, [1, 2])  # broker2 total
+
+
+class TestReconnectMetrics(unittest.IsolatedAsyncioTestCase):
+    """Subscriber reconnect metrics cover all recovery flows."""
+
+    async def test_replacement_counts_snapshot_subscribers(self):
+        broker1 = _make_broker(1)
+        broker2 = _make_broker(2)
+        docker_mgr = _mock_docker_mgr(_components(broker1, broker2))
+        broadcaster = MagicMock()
+        broadcaster.emit = AsyncMock()
+        settings = _mock_settings()
+
+        recovery = RecoveryManager(docker_mgr, broadcaster, settings)
+        snapshot = {
+            "timestamp": time.time() - 5.0,
+            "remote_subscribers": {
+                "subscriber-1:9100": [{"low": 0, "high": 84}],
+                "subscriber-2:9100": [{"low": 85, "high": 169}],
+            },
+        }
+
+        with patch(
+            "aether.orchestrator.metrics.subscriber_reconnects_total.inc"
+        ) as inc:
+            with patch("httpx.AsyncClient") as MockClient:
+                mock_client = AsyncMock()
+                mock_client.request = AsyncMock()
+                mock_client.get = AsyncMock(return_value=MagicMock(status_code=200))
+                mock_client.post = AsyncMock(return_value=MagicMock(status_code=200))
+                MockClient.return_value.__aenter__ = AsyncMock(
+                    return_value=mock_client
+                )
+                MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+                await recovery._recover_replacement(
+                    2, "broker-2", 8000, snapshot, "recovery-123", time.time()
+                )
+
+        inc.assert_called_once_with(2)
+
+    async def test_intentional_delete_counts_reassigned_subscribers(self):
+        broker1 = _make_broker(1)
+        broker2 = _make_broker(2)
+        orphan1 = _make_subscriber(1, broker_id=2)
+        orphan2 = _make_subscriber(2, broker_id=2)
+        docker_mgr = _mock_docker_mgr(_components(broker1, broker2, orphan1, orphan2))
+        broadcaster = MagicMock()
+        broadcaster.emit = AsyncMock()
+        settings = _mock_settings()
+
+        recovery = RecoveryManager(docker_mgr, broadcaster, settings)
+
+        with patch(
+            "aether.orchestrator.metrics.subscriber_reconnects_total.inc"
+        ) as inc:
+            reassigned = await recovery.reassign_orphans(2)
+
+        self.assertEqual(reassigned, 2)
+        inc.assert_called_once_with(2)
 
 
 class TestFetchBestSnapshotPicksFreshest(unittest.IsolatedAsyncioTestCase):
@@ -317,9 +380,7 @@ class TestConcurrentRecoverySerialized(unittest.IsolatedAsyncioTestCase):
 
         execution_order = []
 
-        original_redistribute = recovery._recover_redistribution
-
-        async def tracked_redistribute(broker_id):
+        async def tracked_redistribute(broker_id, recovery_id, t0):
             execution_order.append(("start", broker_id))
             await asyncio.sleep(0.05)
             execution_order.append(("end", broker_id))

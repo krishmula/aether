@@ -195,7 +195,9 @@ class GossipBroker:
                 self._messages_processed += 1
 
             self._local_broker.publish(gossip_msg.msg)
-            self._deliver_to_remote_subscribers(gossip_msg.msg)
+            self._deliver_to_remote_subscribers(
+                gossip_msg.msg, gossip_msg.send_timestamp_ns
+            )
 
             if gossip_msg.ttl > 0:
                 self._gossip_to_peers(gossip_msg)
@@ -209,6 +211,7 @@ class GossipBroker:
             msg_id=gossip_msg.msg_id,
             ttl=gossip_msg.ttl - 1,
             source=gossip_msg.source,
+            send_timestamp_ns=gossip_msg.send_timestamp_ns,
         )
 
         if len(self.peer_brokers) == 0:
@@ -729,11 +732,15 @@ class GossipBroker:
             "remote subscriber unregistered %s range=%s", subscriber, payload_range
         )
 
-    def _deliver_to_remote_subscribers(self, msg: Message) -> None:
+    def _deliver_to_remote_subscribers(
+        self, msg: Message, send_timestamp_ns: int = 0
+    ) -> None:
         remote_subs = self._payload_to_remotes[msg.payload]
         for subscriber_addr in remote_subs:
             try:
-                delivery = PayloadMessageDelivery(msg)
+                delivery = PayloadMessageDelivery(
+                    msg=msg, send_timestamp_ns=send_timestamp_ns
+                )
                 self.network.send(delivery, subscriber_addr)
                 self.log.debug(
                     "delivered payload=%d to remote subscriber %s",

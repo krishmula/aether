@@ -1,7 +1,7 @@
 # Makefile for aether distributed messaging system
 # Targets documented in docs/instructions.md and docs/roadmap.md
 
-.PHONY: demo status logs clean build build-dashboard test lint up down restart ps check-ports purge-network
+.PHONY: demo status logs clean build build-dashboard test lint up down restart ps check-ports purge-network benchmark benchmark-charts
 
 # Colors for better output
 GREEN = \033[0;32m
@@ -36,6 +36,8 @@ help:
 	@echo "  $(YELLOW)make down$(NC)        - Stop compose services"
 	@echo "  $(YELLOW)make restart$(NC)     - Restart compose services"
 	@echo "  $(YELLOW)make ps$(NC)          - Show container status"
+	@echo "  $(YELLOW)make benchmark$(NC)    - Run full benchmark suite (requires: make demo)"
+	@echo "  $(YELLOW)make benchmark-charts$(NC) - Regenerate charts from existing results"
 	@echo "  $(YELLOW)make check-ports$(NC) - Check if required ports are available"
 	@echo ""
 	@echo "See docs/instructions.md for detailed usage"
@@ -134,6 +136,14 @@ check-ports:
 		exit 1; \
 	fi
 	@echo "$(GREEN)All required ports are available.$(NC)"
+
+benchmark:
+	@echo "$(YELLOW)Running benchmark suite (requires: make demo)...$(NC)"
+	python3 -m benchmarks.runner
+
+benchmark-charts:
+	@echo "$(YELLOW)Regenerating charts from existing results...$(NC)"
+	python3 -m benchmarks.runner --charts-only
 
 # Local development targets (without Docker)
 install:

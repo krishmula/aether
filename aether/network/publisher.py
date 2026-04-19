@@ -67,6 +67,7 @@ class NetworkPublisher:
             msg_id=msg_id,
             ttl=self.ttl,
             source=self.address,
+            send_timestamp_ns=time.monotonic_ns(),
         )
 
         sent_count = 0

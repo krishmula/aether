@@ -8,17 +8,15 @@ tests fast.
 from __future__ import annotations
 
 import json
-import threading
 import time
 import unittest
-from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 from aether.core.payload_range import PayloadRange
 from aether.core.uint8 import UInt8
 from aether.gossip.protocol import SubscribeRequest
 from aether.network.node import NodeAddress
-from aether.network.subscriber import NetworkSubscriber, _PING_INTERVAL, _PING_TIMEOUT
+from aether.network.subscriber import NetworkSubscriber
 from aether.snapshot import BrokerRecoveryNotification, Ping, Pong
 
 
@@ -125,7 +123,9 @@ class TestReconnectSuccess(unittest.TestCase):
         mock_resp.__exit__ = MagicMock(return_value=False)
 
         sent = []
-        sub.node.send = MagicMock(side_effect=lambda msg, addr: sent.append((msg, addr)))
+        sub.node.send = MagicMock(
+            side_effect=lambda msg, addr: sent.append((msg, addr))
+        )
 
         with patch("urllib.request.urlopen", return_value=mock_resp):
             with patch("random.uniform", return_value=0):
@@ -174,17 +174,21 @@ class TestReconnectSuccess(unittest.TestCase):
         sub._broker_alive = False
         sub.running = False  # already stopped
 
-        with patch("urllib.request.urlopen", side_effect=AssertionError("should not call")):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=AssertionError("should not call"),
+        ):
             sub._reconnect()  # should return immediately without calling urlopen
 
 
 class TestBrokerRecoveryNotificationFastPath(unittest.TestCase):
-    """BrokerRecoveryNotification resets health state — no pull-based reconnect needed."""
+    """Recovery notifications reset health without a pull-based reconnect."""
 
     def test_recovery_notification_resets_health_state(self):
         sub = _make_subscriber()
         sub._broker_alive = False
         sub._last_pong_time = time.time() - 100
+        sub.log.info = MagicMock()
 
         old_broker = NodeAddress("broker-1", 8000)
         new_broker = NodeAddress("broker-2", 8000)
@@ -198,6 +202,10 @@ class TestBrokerRecoveryNotificationFastPath(unittest.TestCase):
         self.assertTrue(sub._broker_alive)
         self.assertEqual(sub.broker, new_broker)
         self.assertAlmostEqual(sub._last_pong_time, time.time(), delta=1.0)
+        self.assertEqual(
+            sub.log.info.call_args.kwargs["extra"]["event_type"],
+            "subscriber_reconnected",
+        )
 
     def test_recovery_notification_ignored_for_other_broker(self):
         sub = _make_subscriber()

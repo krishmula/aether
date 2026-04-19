@@ -50,7 +50,10 @@ def main():
         "--broker-host",
         action="append",
         default=None,
-        help="Broker host (repeatable, e.g. --broker-host broker-1 --broker-host broker-2)",
+        help=(
+            "Broker host (repeatable, e.g. "
+            "--broker-host broker-1 --broker-host broker-2)"
+        ),
     )
     parser.add_argument(
         "--broker-port",
@@ -78,7 +81,10 @@ def main():
     else:
         if args.publisher_id < 0 or args.publisher_id >= config.publisher_count:
             logger.error(
-                "publisher ID %d out of range [0, %d) — provide --host and --port to bypass",
+                (
+                    "publisher ID %d out of range [0, %d) "
+                    "— provide --host and --port to bypass"
+                ),
                 args.publisher_id,
                 config.publisher_count,
             )
@@ -130,6 +136,12 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Throttle per-message logs: at fast intervals (e.g., 0.001s = 1000 msg/s)
+    # logging every message floods stdout and becomes the bottleneck. Log once
+    # per second's worth of messages so benchmarks can actually measure the
+    # broker mesh, not the logger.
+    log_every = max(1, int(round(1.0 / args.interval))) if args.interval > 0 else 1
+
     msg_count = 0
     try:
         while True:
@@ -137,12 +149,13 @@ def main():
             sent = publisher.publish(Message(payload), redundancy=2)
             msg_count += 1
 
-            logger.info(
-                "published payload=%d sent_to=%d broker(s) (total: %d)",
-                payload,
-                sent,
-                msg_count,
-            )
+            if msg_count % log_every == 0:
+                logger.info(
+                    "published payload=%d sent_to=%d broker(s) (total: %d)",
+                    payload,
+                    sent,
+                    msg_count,
+                )
 
             time.sleep(args.interval)
     except Exception:
