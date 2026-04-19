@@ -93,12 +93,31 @@ export interface BrokerMetrics {
   snapshot_state: string;
 }
 
+export interface LatencyPercentiles {
+  p50: number;
+  p95: number;
+  p99: number;
+  sample_count: number;
+}
+
+export interface SubscriberMetrics {
+  subscriber_id: number;
+  broker_id: number | null;
+  total_received: number;
+  latency_us: LatencyPercentiles;
+}
+
 export interface MetricsResponse {
   brokers: BrokerMetrics[];
+  subscribers: SubscriberMetrics[];
   total_messages_processed: number;
   total_brokers: number;
   total_publishers: number;
   total_subscribers: number;
+  throughput_msgs_per_sec: number;
+  topology_generation: number;
+  fetched_at: number;
+  sample_interval_seconds: number;
 }
 
 export interface WebSocketEvent {

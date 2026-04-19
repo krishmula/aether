@@ -1,0 +1,271 @@
+"""Metric collection helpers for benchmarks."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any
+
+from benchmarks.client import AetherClient
+
+
+async def collect_throughput(
+    client: AetherClient,
+    duration: float,
+    poll_interval: float = 1.0,
+) -> list[dict[str, Any]]:
+    """Poll /api/metrics for *duration* seconds and return per-interval samples.
+
+    Each sample: {"elapsed": float, "messages_total": int, "msgs_per_sec": float}
+    """
+    samples: list[dict[str, Any]] = []
+    start = time.monotonic()
+    prev_total: int | None = None
+    prev_time: float | None = None
+    consecutive_failures = 0
+
+    while time.monotonic() - start < duration:
+        try:
+            metrics = await client.get_metrics()
+            consecutive_failures = 0
+            now = time.monotonic()
+            if "total_messages_processed" not in metrics:
+                raise RuntimeError("metrics payload missing total_messages_processed")
+            total = metrics["total_messages_processed"]
+
+            if prev_total is not None and prev_time is not None:
+                dt = now - prev_time
+                if dt > 0:
+                    msgs_per_sec = (total - prev_total) / dt
+                    samples.append(
+                        {
+                            "elapsed": round(now - start, 2),
+                            "messages_total": total,
+                            "msgs_per_sec": round(msgs_per_sec, 1),
+                        }
+                    )
+
+            prev_total = total
+            prev_time = now
+        except Exception as exc:
+            consecutive_failures += 1
+            if consecutive_failures >= client.cfg.max_metrics_read_failures:
+                raise RuntimeError(
+                    "failed to collect throughput metrics after "
+                    f"{consecutive_failures} consecutive errors: {exc}"
+                ) from exc
+
+        await asyncio.sleep(poll_interval)
+
+    if len(samples) < client.cfg.min_throughput_samples:
+        raise RuntimeError(
+            "insufficient throughput samples: "
+            f"expected at least {client.cfg.min_throughput_samples}, got {len(samples)}"
+        )
+
+    return samples
+
+
+def compute_stats(values: list[float]) -> dict[str, float]:
+    """Compute summary statistics from a list of numeric values."""
+    if not values:
+        return {"mean": 0, "p50": 0, "p95": 0, "p99": 0, "max": 0, "min": 0, "count": 0}
+    s = sorted(values)
+    n = len(s)
+    return {
+        "mean": round(sum(s) / n, 2),
+        "p50": round(s[n // 2], 2),
+        "p95": round(s[int(n * 0.95)], 2),
+        "p99": round(s[int(n * 0.99)], 2),
+        "max": round(s[-1], 2),
+        "min": round(s[0], 2),
+        "count": n,
+    }
+
+
+async def collect_latency(
+    client: AetherClient,
+) -> dict[str, Any]:
+    """Harvest raw latency samples from subscriber /status endpoints.
+
+    Returns exact per-subscriber and cluster-wide percentiles computed from the
+    merged raw sample set rather than averaged per-subscriber percentiles.
+    """
+    state = await client.get_state()
+    subscriber_latencies: list[dict[str, Any]] = []
+    all_samples_us: list[float] = []
+
+    for sub in state.get("subscribers", []):
+        host_port = sub.get("host_status_port")
+        if host_port is None:
+            continue
+
+        status = await client.get_subscriber_status("localhost", host_port)
+        samples_us = status.get("latency_samples_us", [])
+        if not samples_us:
+            continue
+
+        sorted_samples_us = sorted(float(sample) for sample in samples_us)
+        all_samples_us.extend(sorted_samples_us)
+        subscriber_latencies.append(
+            {
+                "subscriber_id": sub.get("component_id"),
+                "broker_id": sub.get("broker_id"),
+                "sample_count": len(sorted_samples_us),
+                "latency_us": _compute_percentiles(sorted_samples_us),
+                "latency_samples_us": sorted_samples_us,
+            }
+        )
+
+    if not all_samples_us:
+        return {
+            "subscribers": [],
+            "aggregate": {"p50": 0, "p95": 0, "p99": 0, "sample_count": 0},
+        }
+
+    aggregate = _compute_percentiles(sorted(all_samples_us))
+    aggregate["sample_count"] = len(all_samples_us)
+
+    return {"subscribers": subscriber_latencies, "aggregate": aggregate}
+
+
+def _compute_percentiles(sorted_values: list[float]) -> dict[str, float]:
+    """Compute exact percentile picks from an already-sorted sample list."""
+    n = len(sorted_values)
+    if n == 0:
+        return {"p50": 0, "p95": 0, "p99": 0}
+    return {
+        "p50": round(sorted_values[n // 2], 1),
+        "p95": round(sorted_values[int(n * 0.95)], 1),
+        "p99": round(sorted_values[int(n * 0.99)], 1),
+    }
+
+
+async def collect_recovery_events(
+    events: asyncio.Queue[dict[str, Any]],
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Capture recovery event timestamps from the WebSocket event queue.
+
+    Waits for BROKER_DECLARED_DEAD -> BROKER_RECOVERED -> SUBSCRIBER_RECONNECTED.
+    Returns timing breakdown.
+    """
+    t_dead: float | None = None
+    t_recovery_started: float | None = None
+    t_recovered: float | None = None
+    recovery_path: str | None = None
+    reconnect_times: list[float] = []
+
+    deadline = asyncio.get_event_loop().time() + timeout
+
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            event = await asyncio.wait_for(events.get(), timeout=2.0)
+        except asyncio.TimeoutError:
+            if t_recovered is not None:
+                break
+            continue
+
+        etype = event.get("type", "")
+        ts = event.get("timestamp", 0)
+
+        if etype == "broker_declared_dead" and t_dead is None:
+            t_dead = ts
+        elif etype == "broker_recovery_started" and t_recovery_started is None:
+            t_recovery_started = ts
+            recovery_path = event.get("data", {}).get("recovery_path")
+        elif etype == "broker_recovered" and t_recovered is None:
+            t_recovered = ts
+            if recovery_path is None:
+                recovery_path = event.get("data", {}).get("recovery_path")
+        elif etype == "subscriber_reconnected":
+            reconnect_times.append(ts)
+
+    result: dict[str, Any] = {"recovery_path": recovery_path}
+
+    if t_dead is not None and t_recovered is not None:
+        result["detection_time_s"] = round(
+            (t_recovery_started or t_recovered) - t_dead, 3
+        )
+        result["recovery_time_s"] = round(t_recovered - t_dead, 3)
+    if t_dead is not None and reconnect_times:
+        result["subscriber_reconnect_time_s"] = round(max(reconnect_times) - t_dead, 3)
+
+    missing: list[str] = []
+    if t_dead is None:
+        missing.append("broker_declared_dead")
+    if t_recovery_started is None:
+        missing.append("broker_recovery_started")
+    if t_recovered is None:
+        missing.append("broker_recovered")
+    if not reconnect_times:
+        missing.append("subscriber_reconnected")
+    if missing:
+        raise RuntimeError(
+            "incomplete recovery event timeline: missing " + ", ".join(missing)
+        )
+
+    return result
+
+
+async def collect_snapshot_events(
+    events: asyncio.Queue[dict[str, Any]],
+    rounds: int = 3,
+    timeout_per_round: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Capture SNAPSHOT_COMPLETE events and measure coordination overhead.
+
+    Returns per-round timing: time between first and last broker completing.
+    """
+    results: list[dict[str, Any]] = []
+    round_events: list[dict[str, Any]] = []
+    last_event_time: float = asyncio.get_event_loop().time()
+
+    while len(results) < rounds:
+        try:
+            event = await asyncio.wait_for(events.get(), timeout=timeout_per_round)
+        except asyncio.TimeoutError:
+            if round_events:
+                results.append(_summarize_snapshot_round(round_events))
+                round_events = []
+            break
+
+        if event.get("type") == "snapshot_complete":
+            now = asyncio.get_event_loop().time()
+            round_events.append(event)
+
+            # If >5s gap since last snapshot event, start a new round.
+            if now - last_event_time > 5.0 and len(round_events) > 1:
+                results.append(_summarize_snapshot_round(round_events[:-1]))
+                round_events = [round_events[-1]]
+
+            last_event_time = now
+
+    if round_events and len(results) < rounds:
+        results.append(_summarize_snapshot_round(round_events))
+
+    if len(results) < rounds:
+        raise RuntimeError(
+            "incomplete snapshot rounds: "
+            f"expected {rounds}, got {len(results)}"
+        )
+
+    return results
+
+
+def _summarize_snapshot_round(events: list[dict[str, Any]]) -> dict[str, Any]:
+    # Use each broker's own snapshot_timestamp (when it actually completed the
+    # snapshot) rather than the WebSocket event's timestamp (when the orchestrator
+    # emitted the event). The orchestrator emits all events in the same for-loop
+    # so event timestamps are indistinguishable; broker timestamps reflect real
+    # per-broker completion times.
+    timestamps = [
+        e.get("data", {}).get("snapshot_timestamp") or e.get("timestamp", 0)
+        for e in events
+    ]
+    if not timestamps:
+        return {"broker_count": 0, "coordination_ms": 0}
+    return {
+        "broker_count": len(events),
+        "coordination_ms": round((max(timestamps) - min(timestamps)) * 1000, 1),
+    }

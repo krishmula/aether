@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.request
 from urllib.error import URLError
 
@@ -19,8 +20,10 @@ from .models import (
     CreateBrokerRequest,
     CreatePublisherRequest,
     CreateSubscriberRequest,
+    LatencyPercentiles,
     MetricsResponse,
     SnapshotStatusResponse,
+    SubscriberMetrics,
     SystemState,
     TopologyEdge,
     TopologyNode,
@@ -47,6 +50,10 @@ class DockerManager:
         self._components: dict[str, ComponentInfo] = (
             {}
         )  # container_name -> ComponentInfo
+        self._topology_generation: int = 0
+        self._last_total_messages: int = 0
+        self._last_metrics_time: float = 0.0
+        self._metrics_cache = MetricsResponse()
         self._ensure_network()
 
     def _ensure_network(self) -> None:
@@ -103,6 +110,7 @@ class DockerManager:
         )
         self._components[container_name] = info
         info.status = ComponentStatus.RUNNING
+        self._advance_topology_generation()
         logger.info("Started broker %d (container %s)", broker_id, container.id[:12])
         return info
 
@@ -114,6 +122,7 @@ class DockerManager:
         container.remove()
         remove_container_info.status = ComponentStatus.STOPPED
         del self._components[remove_container_info.container_name]
+        self._advance_topology_generation()
         logger.info(
             "Removed broker %d (container %s)",
             broker_id,
@@ -190,6 +199,7 @@ class DockerManager:
         )
         self._components[container_name] = info
         info.status = ComponentStatus.RUNNING
+        self._advance_topology_generation()
         logger.info(
             "Started publisher %d (container %s)", publisher_id, container.id[:12]
         )
@@ -203,6 +213,7 @@ class DockerManager:
         container.remove()
         info.status = ComponentStatus.STOPPED
         del self._components[info.container_name]
+        self._advance_topology_generation()
         logger.info(
             "Removed publisher %d (container %s)", publisher_id, info.container_id[:12]
         )
@@ -262,6 +273,7 @@ class DockerManager:
         )
         self._components[container_name] = info
         info.status = ComponentStatus.RUNNING
+        self._advance_topology_generation()
         logger.info(
             "Started subscriber %d (container %s)", subscriber_id, container.id[:12]
         )
@@ -275,6 +287,7 @@ class DockerManager:
         container.remove()
         info.status = ComponentStatus.STOPPED
         del self._components[info.container_name]
+        self._advance_topology_generation()
         logger.info(
             "Removed subscriber %d (container %s)",
             subscriber_id,
@@ -377,7 +390,20 @@ class DockerManager:
         return TopologyResponse(nodes=nodes, edges=edges)
 
     def get_metrics(self) -> MetricsResponse:
-        """Aggregate metrics by polling each broker's /status endpoint."""
+        """Return the latest cached metrics snapshot.
+
+        The authoritative sampler updates this cache on a fixed cadence via
+        ``refresh_metrics_cache()``. Reads must stay passive: no Docker sync,
+        no component fanout polling, and no mutation of throughput baselines.
+        """
+        return self._metrics_cache.model_copy(deep=True)
+
+    def refresh_metrics_cache(
+        self,
+        now: float | None = None,
+        fetched_at: float | None = None,
+    ) -> MetricsResponse:
+        """Aggregate metrics by polling broker and subscriber /status endpoints."""
         self._sync_component_status()
         brokers, publishers, subscribers = [], [], []
         for info in self._components.values():
@@ -407,13 +433,51 @@ class DockerManager:
                 )
             )
 
-        return MetricsResponse(
+        # Poll subscriber /status for latency percentiles.
+        subscriber_metrics = []
+        for info in subscribers:
+            raw = self._fetch_status(info.hostname, info.internal_status_port)
+            lat = raw.get("latency_us", {})
+            subscriber_metrics.append(
+                SubscriberMetrics(
+                    subscriber_id=info.component_id,
+                    broker_id=info.broker_id,
+                    total_received=raw.get("total_received", 0),
+                    latency_us=LatencyPercentiles(
+                        p50=lat.get("p50", 0),
+                        p95=lat.get("p95", 0),
+                        p99=lat.get("p99", 0),
+                        sample_count=lat.get("sample_count", 0),
+                    ),
+                )
+            )
+
+        # Compute throughput from the authoritative sampler delta only.
+        now = time.monotonic() if now is None else now
+        throughput = 0.0
+        sample_interval = 0.0
+        if self._last_metrics_time > 0:
+            sample_interval = now - self._last_metrics_time
+            if sample_interval > 0:
+                delta = total_messages - self._last_total_messages
+                throughput = max(0, delta / sample_interval)
+        self._last_total_messages = total_messages
+        self._last_metrics_time = now
+
+        sample = MetricsResponse(
             brokers=broker_metrics,
+            subscribers=subscriber_metrics,
             total_messages_processed=total_messages,
             total_brokers=len(brokers),
             total_publishers=len(publishers),
             total_subscribers=len(subscribers),
+            throughput_msgs_per_sec=round(throughput, 1),
+            topology_generation=self._topology_generation,
+            fetched_at=time.time() if fetched_at is None else fetched_at,
+            sample_interval_seconds=round(sample_interval, 3),
         )
+        self._metrics_cache = sample
+        return sample.model_copy(deep=True)
 
     def trigger_snapshot(
         self, initiator_broker_id: int | None
@@ -422,6 +486,15 @@ class DockerManager:
         raise NotImplementedError
 
     # --- Internal Helpers ---
+
+    def _advance_topology_generation(self) -> None:
+        """Invalidate cached metrics when component membership changes."""
+        self._topology_generation += 1
+        self._last_total_messages = 0
+        self._last_metrics_time = 0.0
+        self._metrics_cache = MetricsResponse(
+            topology_generation=self._topology_generation
+        )
 
     def _next_id(self, component_type: ComponentType, start: int = 1) -> int:
         """Return the lowest unused integer ID for the given component type."""
