@@ -99,7 +99,7 @@
       "id": 3,
       "type": "stat",
       "title": "Subscriber Reconnects (1h)",
-      "description": "Subscribers reassigned by the orchestrator during redistribution recovery in the last hour.",
+      "description": "Subscribers whose connectivity was restored during broker recovery or reassignment in the last hour.",
       "datasource": { "type": "prometheus", "uid": "aether-prometheus" },
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "options": {
@@ -303,7 +303,7 @@
       "id": 9,
       "type": "logs",
       "title": "Subscriber Reconnect Events",
-      "description": "Logs from subscribers that successfully reconnected to a new broker after failover.",
+      "description": "Subscriber-side confirmation logs for restored connectivity after failover, whether recovery was push-notified or pull-based.",
       "datasource": { "type": "loki", "uid": "aether-loki" },
       "gridPos": { "h": 6, "w": 24, "x": 0, "y": 28 },
       "options": {
