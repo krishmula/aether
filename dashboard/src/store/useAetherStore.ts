@@ -24,6 +24,7 @@ interface AetherState {
   snapshots: SnapshotsResponse | null;
   prevTotalMessages: number;
   throughput: number;
+  throughputHistory: number[];
   snapshotWave: boolean;
   events: WebSocketEvent[];
   wsConnected: boolean;
@@ -51,6 +52,7 @@ export const useAetherStore = create<AetherState>((set, get) => ({
   snapshots: null,
   prevTotalMessages: 0,
   throughput: 0,
+  throughputHistory: [],
   snapshotWave: false,
   events: [],
   wsConnected: false,
@@ -78,14 +80,13 @@ export const useAetherStore = create<AetherState>((set, get) => ({
   fetchMetrics: async () => {
     try {
       const metrics = await api.getMetrics();
-      const prev = get().prevTotalMessages;
-      const current = metrics.total_messages_processed;
-      const delta = current - prev;
-      const throughput = prev > 0 ? delta / 2 : 0;
+      const throughput = metrics.throughput_msgs_per_sec ?? 0;
+      const history = [...get().throughputHistory, throughput].slice(-30);
       set({
         metrics,
-        prevTotalMessages: current,
+        prevTotalMessages: metrics.total_messages_processed,
         throughput,
+        throughputHistory: history,
       });
     } catch (e) {
       console.error("Failed to fetch metrics:", e);
