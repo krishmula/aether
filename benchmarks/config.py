@@ -26,6 +26,13 @@ class BenchmarkConfig:
     min_throughput_samples: int = 3
     metrics_max_staleness_seconds: float = 3.0
     max_metrics_read_failures: int = 3
+    window_retry_limit: int = 2
+    throughput_retry_backoff_seconds: float = 2.0
+    scaling_retry_backoff_seconds: float = 3.0
+    near_zero_msgs_per_sec: float = 1.0
+    max_near_zero_sample_ratio: float = 0.5
+    scaling_saturation_gain_threshold_pct: float = 5.0
+    scaling_saturation_consecutive_steps: int = 2
     # Publisher send interval in seconds. 0.001 = 1000 msg/s per publisher.
     # The default 1.0 used by /api/seed is intentionally throttled for the UI
     # demo; benchmarks need the mesh pushed hard to find real limits.
@@ -50,6 +57,7 @@ class BenchmarkConfig:
     latency_ready_poll_interval: float = 1.0
     latency_ready_consecutive_polls: int = 3
     latency_min_samples_per_subscriber: int = 20
+    latency_min_delivery_ratio: float = 0.7
 
     # Snapshot benchmark
     snapshot_broker_counts: list[int] = field(default_factory=lambda: [3, 5, 7, 10])

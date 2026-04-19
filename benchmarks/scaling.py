@@ -9,10 +9,78 @@ import time
 from typing import Any
 
 from benchmarks.client import AetherClient
-from benchmarks.collectors import collect_throughput
+from benchmarks.collectors import classify_throughput_window, collect_throughput
 from benchmarks.config import BenchmarkConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _find_saturation_point(
+    timeline: list[dict[str, Any]],
+    *,
+    gain_threshold_pct: float,
+    consecutive_steps: int,
+) -> dict[str, Any] | None:
+    """Return saturation point after consecutive low-gain steps."""
+    low_gain_streak = 0
+
+    for i in range(1, len(timeline)):
+        prev_rate = timeline[i - 1]["mean_msgs_per_sec"]
+        curr_rate = timeline[i]["mean_msgs_per_sec"]
+        if prev_rate <= 0:
+            low_gain_streak = 0
+            continue
+
+        pct_increase = (curr_rate - prev_rate) / prev_rate * 100
+        if pct_increase < gain_threshold_pct:
+            low_gain_streak += 1
+            if low_gain_streak >= consecutive_steps:
+                return {
+                    "publishers": timeline[i]["publishers"],
+                    "throughput": curr_rate,
+                    "pct_increase_from_prev": round(pct_increase, 1),
+                    "gain_threshold_pct": gain_threshold_pct,
+                    "consecutive_low_gain_steps": low_gain_streak,
+                }
+        else:
+            low_gain_streak = 0
+
+    return None
+
+
+async def _measure_scaling_step(
+    client: AetherClient,
+    cfg: BenchmarkConfig,
+    *,
+    publishers: int,
+) -> list[dict[str, Any]]:
+    expected_topology = await client.get_topology_fingerprint()
+    metrics = await client.get_metrics()
+    client.assert_valid_metrics_snapshot(metrics, stage="scaling measurement")
+    expected_generation = metrics["topology_generation"]
+
+    samples = await collect_throughput(
+        client,
+        cfg.scaling_step_seconds,
+        cfg.poll_interval,
+        expected_generation=expected_generation,
+        stage="scaling measurement",
+    )
+    await client.assert_topology_matches(
+        expected_topology,
+        stage="scaling measurement",
+    )
+
+    invalid_reason = classify_throughput_window(
+        samples,
+        active_publishers=publishers,
+        near_zero_msgs_per_sec=cfg.near_zero_msgs_per_sec,
+        max_near_zero_sample_ratio=cfg.max_near_zero_sample_ratio,
+    )
+    if invalid_reason is not None:
+        raise RuntimeError(invalid_reason)
+
+    return samples
 
 
 async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
@@ -41,7 +109,13 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             cfg.scaling_initial_publishers,
             cfg.scaling_subscribers,
         )
-        await client.wait_all_running(timeout=60)
+        try:
+            await client.wait_all_running(timeout=60)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "scaling startup timeout before first measurement: "
+                f"{exc}"
+            ) from exc
 
         logger.info("scaling: warmup (%ds)...", cfg.warmup_seconds)
         await asyncio.sleep(cfg.warmup_seconds)
@@ -59,11 +133,41 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 current_publishers,
                 cfg.scaling_step_seconds,
             )
+            max_attempts = 1 + cfg.window_retry_limit
+            samples: list[dict[str, Any]] | None = None
+            attempt_used = 0
+            last_error: RuntimeError | None = None
 
-            # Measure throughput for one step.
-            samples = await collect_throughput(
-                client, cfg.scaling_step_seconds, cfg.poll_interval
-            )
+            for attempt in range(1, max_attempts + 1):
+                attempt_used = attempt
+                try:
+                    samples = await _measure_scaling_step(
+                        client,
+                        cfg,
+                        publishers=current_publishers,
+                    )
+                    break
+                except RuntimeError as exc:
+                    last_error = exc
+                    if attempt >= max_attempts:
+                        raise RuntimeError(
+                            "scaling step invalid after retry budget at "
+                            f"{current_publishers} publishers: {exc}"
+                        ) from exc
+
+                    logger.warning(
+                        "scaling step invalid, retrying after %.1fs: %s",
+                        cfg.scaling_retry_backoff_seconds,
+                        exc,
+                    )
+                    await asyncio.sleep(cfg.scaling_retry_backoff_seconds)
+
+            if samples is None:
+                raise RuntimeError(
+                    "scaling step failed without samples"
+                    if last_error is None
+                    else str(last_error)
+                )
 
             rates = [s["msgs_per_sec"] for s in samples]
             if rates:
@@ -75,6 +179,7 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 "elapsed": round(time.monotonic() - start, 1),
                 "publishers": current_publishers,
                 "mean_msgs_per_sec": round(mean_rate, 1),
+                "attempts": attempt_used,
                 "samples": samples,
             }
             timeline.append(step_entry)
@@ -92,6 +197,7 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             current_publishers += 1
             try:
                 await client.add_publisher(broker_ids=broker_ids)
+                await client.wait_all_running(timeout=60)
                 publisher_additions.append(
                     {
                         "elapsed": round(time.monotonic() - start, 1),
@@ -101,27 +207,20 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 # Brief pause for the new publisher to start.
                 await asyncio.sleep(3)
             except Exception as exc:
-                logger.warning("failed to add publisher: %s", exc)
-                break
+                raise RuntimeError(
+                    "scaling publisher startup timeout at "
+                    f"{current_publishers} publishers: {exc}"
+                ) from exc
 
     finally:
         await client.cleanup()
         await client.close()
 
-    # Find saturation point: where adding a publisher increases throughput < 5%.
-    saturation_point: dict[str, Any] | None = None
-    for i in range(1, len(timeline)):
-        prev_rate = timeline[i - 1]["mean_msgs_per_sec"]
-        curr_rate = timeline[i]["mean_msgs_per_sec"]
-        if prev_rate > 0:
-            pct_increase = (curr_rate - prev_rate) / prev_rate * 100
-            if pct_increase < 5.0:
-                saturation_point = {
-                    "publishers": timeline[i]["publishers"],
-                    "throughput": curr_rate,
-                    "pct_increase_from_prev": round(pct_increase, 1),
-                }
-                break
+    saturation_point = _find_saturation_point(
+        timeline,
+        gain_threshold_pct=cfg.scaling_saturation_gain_threshold_pct,
+        consecutive_steps=cfg.scaling_saturation_consecutive_steps,
+    )
 
     output = {
         "benchmark": "scaling",
