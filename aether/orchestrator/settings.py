@@ -22,7 +22,7 @@ class OrchestratorSettings(BaseSettings):
     otel_endpoint: Optional[str] = None
 
     # Recovery settings
-    snapshot_max_age: float = 30.0
+    snapshot_max_age: float = 45.0
     health_poll_interval: float = 0.5
     health_timeout: float = 15.0
     recovery_timeout: float = 30.0
