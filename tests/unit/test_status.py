@@ -49,6 +49,25 @@ def _get(port: int, path: str = "/status"):
             return exc, None
 
 
+def _post(port: int, path: str):
+    """Make a POST request and return (http_response, parsed_json_or_None)."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=b"{}",
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = resp.read().decode("utf-8")
+            return resp, json.loads(body)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        try:
+            return exc, json.loads(body)
+        except json.JSONDecodeError:
+            return exc, None
+
+
 class TestStatusServer(unittest.TestCase):
     """Tests for StatusServer / _StatusHandler."""
 
@@ -346,6 +365,8 @@ class TestSubscriberStatusServer(unittest.TestCase):
                 "total_received",
                 "running",
                 "uptime_seconds",
+                "latency_us",
+                "latency_samples_us",
             }
             missing = required_keys - data.keys()
             self.assertEqual(missing, set(), f"Missing keys: {missing}")
@@ -354,6 +375,8 @@ class TestSubscriberStatusServer(unittest.TestCase):
             self.assertIsInstance(data["total_received"], int)
             self.assertIsInstance(data["running"], bool)
             self.assertIsInstance(data["uptime_seconds"], float)
+            self.assertIsInstance(data["latency_us"], dict)
+            self.assertIsInstance(data["latency_samples_us"], list)
         finally:
             server.stop()
             sub.node.close()
@@ -383,6 +406,38 @@ class TestSubscriberStatusServer(unittest.TestCase):
             self.assertEqual(after["broker"], str(broker_addr))
             self.assertTrue(after["running"])
             self.assertEqual(after["total_received"], 42)
+        finally:
+            server.stop()
+            sub.node.close()
+
+    def test_status_reports_latency_samples_and_percentiles(self) -> None:
+        """Subscriber /status exposes raw latency samples and percentile summary."""
+        sub, server, port = self._make_subscriber_and_server()
+        sub._latency_samples_ns.extend([1_000_000, 2_000_000, 3_000_000])
+        server.start()
+        try:
+            _, data = _get(port, "/status")
+            self.assertEqual(data["latency_us"]["sample_count"], 3)
+            self.assertEqual(data["latency_us"]["p50"], 2000.0)
+            self.assertEqual(data["latency_samples_us"], [1000.0, 2000.0, 3000.0])
+        finally:
+            server.stop()
+            sub.node.close()
+
+    def test_latency_reset_clears_subscriber_samples(self) -> None:
+        """POST /latency/reset clears the in-memory subscriber latency buffer."""
+        sub, server, port = self._make_subscriber_and_server()
+        sub._latency_samples_ns.extend([1_000_000, 2_000_000])
+        server.start()
+        try:
+            resp, data = _post(port, "/latency/reset")
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(data["status"], "ok")
+            self.assertEqual(data["cleared_samples"], 2)
+
+            _, after = _get(port, "/status")
+            self.assertEqual(after["latency_us"]["sample_count"], 0)
+            self.assertEqual(after["latency_samples_us"], [])
         finally:
             server.stop()
             sub.node.close()

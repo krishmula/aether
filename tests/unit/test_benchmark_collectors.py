@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from benchmarks.collectors import (
+    classify_latency_window,
+    classify_throughput_window,
     collect_recovery_events,
     collect_snapshot_events,
     collect_throughput,
@@ -18,9 +20,46 @@ class _FakeClient:
     def __init__(self, cfg: BenchmarkConfig) -> None:
         self.cfg = cfg
         self.get_metrics = AsyncMock()
+        self.assert_valid_metrics_snapshot = MagicMock()
 
 
 class TestCollectThroughput(unittest.IsolatedAsyncioTestCase):
+    async def test_collect_throughput_validates_metrics_contract_per_sample(
+        self,
+    ) -> None:
+        client = _FakeClient(BenchmarkConfig(min_throughput_samples=2))
+        client.get_metrics.side_effect = [
+            {
+                "topology_generation": 4,
+                "fetched_at": 100.0,
+                "sample_interval_seconds": 1.0,
+                "total_messages_processed": 100,
+            },
+            {
+                "topology_generation": 4,
+                "fetched_at": 101.0,
+                "sample_interval_seconds": 1.0,
+                "total_messages_processed": 110,
+            },
+            {
+                "topology_generation": 4,
+                "fetched_at": 102.0,
+                "sample_interval_seconds": 1.0,
+                "total_messages_processed": 120,
+            },
+        ]
+
+        samples = await collect_throughput(
+            client,
+            duration=0.03,
+            poll_interval=0.01,
+            expected_generation=4,
+            stage="throughput measurement",
+        )
+
+        self.assertGreaterEqual(len(samples), 2)
+        client.assert_valid_metrics_snapshot.assert_called()
+
     async def test_collect_throughput_raises_after_repeated_metrics_failures(
         self,
     ) -> None:
@@ -45,6 +84,74 @@ class TestCollectThroughput(unittest.IsolatedAsyncioTestCase):
             "insufficient throughput samples",
         ):
             await collect_throughput(client, duration=0.03, poll_interval=0.02)
+
+
+class TestClassifyThroughputWindow(unittest.TestCase):
+    def test_invalidates_window_with_too_many_near_zero_samples(self) -> None:
+        reason = classify_throughput_window(
+            [
+                {"msgs_per_sec": 0.0},
+                {"msgs_per_sec": 0.5},
+                {"msgs_per_sec": 25.0},
+            ],
+            active_publishers=2,
+            near_zero_msgs_per_sec=1.0,
+            max_near_zero_sample_ratio=0.5,
+        )
+
+        self.assertIn("too many near-zero samples", reason)
+
+    def test_allows_window_with_healthy_rate_distribution(self) -> None:
+        reason = classify_throughput_window(
+            [
+                {"msgs_per_sec": 50.0},
+                {"msgs_per_sec": 55.0},
+                {"msgs_per_sec": 60.0},
+            ],
+            active_publishers=2,
+            near_zero_msgs_per_sec=1.0,
+            max_near_zero_sample_ratio=0.5,
+        )
+
+        self.assertIsNone(reason)
+
+
+class TestClassifyLatencyWindow(unittest.TestCase):
+    def test_rejects_undersampled_subscribers(self) -> None:
+        reason = classify_latency_window(
+            {
+                "subscribers": [
+                    {"subscriber_id": 1, "sample_count": 5},
+                    {"subscriber_id": 2, "sample_count": 25},
+                ],
+                "aggregate": {"sample_count": 30},
+            },
+            expected_subscribers=2,
+            min_samples_per_subscriber=20,
+            processed_messages_delta=100,
+            expected_messages=100.0,
+            min_delivery_ratio=0.7,
+        )
+
+        self.assertIn("below minimum sample count", reason)
+
+    def test_rejects_window_with_low_processed_message_ratio(self) -> None:
+        reason = classify_latency_window(
+            {
+                "subscribers": [
+                    {"subscriber_id": 1, "sample_count": 25},
+                    {"subscriber_id": 2, "sample_count": 25},
+                ],
+                "aggregate": {"sample_count": 50},
+            },
+            expected_subscribers=2,
+            min_samples_per_subscriber=20,
+            processed_messages_delta=20,
+            expected_messages=100.0,
+            min_delivery_ratio=0.7,
+        )
+
+        self.assertIn("processed-message ratio", reason)
 
 
 class TestEventCollectors(unittest.IsolatedAsyncioTestCase):

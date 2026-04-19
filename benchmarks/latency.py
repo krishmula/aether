@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from benchmarks.client import AetherClient
-from benchmarks.collectors import collect_latency
+from benchmarks.collectors import classify_latency_window, collect_latency
 from benchmarks.config import BenchmarkConfig
 
 logger = logging.getLogger(__name__)
@@ -76,9 +76,21 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
         await client.reset_all_subscriber_latency_samples(
             expected_subscribers=cfg.latency_subscribers
         )
+        metrics_before = await client.get_metrics()
+        client.assert_valid_metrics_snapshot(
+            metrics_before,
+            stage="latency measurement start",
+        )
+        measurement_generation = metrics_before["topology_generation"]
 
         logger.info("latency: measuring for %ds...", cfg.measurement_seconds)
         await asyncio.sleep(cfg.measurement_seconds)
+        metrics_after = await client.get_metrics()
+        client.assert_valid_metrics_snapshot(
+            metrics_after,
+            stage="latency measurement end",
+            expected_generation=measurement_generation,
+        )
         await client.assert_topology_matches(
             expected_topology,
             stage="latency measurement",
@@ -86,24 +98,27 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
 
         # Harvest latency data from subscribers.
         latency_data = await collect_latency(client)
-        subscriber_data = latency_data.get("subscribers", [])
-        if len(subscriber_data) != cfg.latency_subscribers:
-            raise RuntimeError(
-                "latency benchmark invalid: expected "
-                f"{cfg.latency_subscribers} subscribers with samples, got "
-                f"{len(subscriber_data)}"
-            )
-
-        undersampled = [
-            f"{sub['subscriber_id']}:{sub['sample_count']}"
-            for sub in subscriber_data
-            if sub.get("sample_count", 0) < cfg.latency_min_samples_per_subscriber
-        ]
-        if undersampled:
-            raise RuntimeError(
-                "latency benchmark invalid: subscribers below minimum sample count "
-                f"({cfg.latency_min_samples_per_subscriber}): {undersampled}"
-            )
+        processed_messages_delta = (
+            int(metrics_after.get("total_messages_processed", 0))
+            - int(metrics_before.get("total_messages_processed", 0))
+        )
+        expected_messages = (
+            cfg.latency_publishers
+            * cfg.measurement_seconds
+            / cfg.latency_publish_interval
+            if cfg.latency_publish_interval > 0
+            else 0.0
+        )
+        invalid_reason = classify_latency_window(
+            latency_data,
+            expected_subscribers=cfg.latency_subscribers,
+            min_samples_per_subscriber=cfg.latency_min_samples_per_subscriber,
+            processed_messages_delta=processed_messages_delta,
+            expected_messages=expected_messages,
+            min_delivery_ratio=cfg.latency_min_delivery_ratio,
+        )
+        if invalid_reason is not None:
+            raise RuntimeError(invalid_reason)
 
         agg = latency_data.get("aggregate", {})
         logger.info(

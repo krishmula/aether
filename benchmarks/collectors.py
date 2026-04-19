@@ -13,6 +13,9 @@ async def collect_throughput(
     client: AetherClient,
     duration: float,
     poll_interval: float = 1.0,
+    *,
+    expected_generation: int | None = None,
+    stage: str = "throughput measurement",
 ) -> list[dict[str, Any]]:
     """Poll /api/metrics for *duration* seconds and return per-interval samples.
 
@@ -24,9 +27,17 @@ async def collect_throughput(
     prev_time: float | None = None
     consecutive_failures = 0
 
+    current_generation = expected_generation
     while time.monotonic() - start < duration:
         try:
             metrics = await client.get_metrics()
+            client.assert_valid_metrics_snapshot(
+                metrics,
+                stage=stage,
+                expected_generation=current_generation,
+            )
+            if current_generation is None:
+                current_generation = metrics["topology_generation"]
             consecutive_failures = 0
             now = time.monotonic()
             if "total_messages_processed" not in metrics:
@@ -64,6 +75,36 @@ async def collect_throughput(
         )
 
     return samples
+
+
+def classify_throughput_window(
+    samples: list[dict[str, Any]],
+    *,
+    active_publishers: int,
+    near_zero_msgs_per_sec: float,
+    max_near_zero_sample_ratio: float,
+) -> str | None:
+    """Return an explicit invalidity reason when a throughput window looks poisoned."""
+    if not samples:
+        return "throughput window produced no samples"
+
+    if active_publishers <= 0:
+        return None
+
+    near_zero_count = sum(
+        1
+        for sample in samples
+        if float(sample.get("msgs_per_sec", 0.0)) <= near_zero_msgs_per_sec
+    )
+    near_zero_ratio = near_zero_count / len(samples)
+    if near_zero_ratio > max_near_zero_sample_ratio:
+        return (
+            "throughput window has too many near-zero samples under active "
+            f"publishers: {near_zero_count}/{len(samples)} at or below "
+            f"{near_zero_msgs_per_sec:.1f} msg/s"
+        )
+
+    return None
 
 
 def compute_stats(values: list[float]) -> dict[str, float]:
@@ -127,6 +168,49 @@ async def collect_latency(
     aggregate["sample_count"] = len(all_samples_us)
 
     return {"subscribers": subscriber_latencies, "aggregate": aggregate}
+
+
+def classify_latency_window(
+    latency_data: dict[str, Any],
+    *,
+    expected_subscribers: int,
+    min_samples_per_subscriber: int,
+    processed_messages_delta: int,
+    expected_messages: float,
+    min_delivery_ratio: float,
+) -> str | None:
+    """Return an explicit invalidity reason when a latency window is not trustworthy."""
+    subscriber_data = latency_data.get("subscribers", [])
+    if len(subscriber_data) != expected_subscribers:
+        return (
+            "latency benchmark invalid: expected "
+            f"{expected_subscribers} subscribers with samples, got "
+            f"{len(subscriber_data)}"
+        )
+
+    undersampled = [
+        f"{sub['subscriber_id']}:{sub['sample_count']}"
+        for sub in subscriber_data
+        if sub.get("sample_count", 0) < min_samples_per_subscriber
+    ]
+    if undersampled:
+        return (
+            "latency benchmark invalid: subscribers below minimum sample count "
+            f"({min_samples_per_subscriber}): {undersampled}"
+        )
+
+    if expected_messages > 0:
+        observed_ratio = processed_messages_delta / expected_messages
+        if observed_ratio < min_delivery_ratio:
+            return (
+                "latency benchmark invalid: observed processed-message ratio "
+                f"{observed_ratio:.2f} below unsaturated floor "
+                f"{min_delivery_ratio:.2f} "
+                f"(processed_delta={processed_messages_delta}, "
+                f"expected_messages={expected_messages:.1f})"
+            )
+
+    return None
 
 
 def _compute_percentiles(sorted_values: list[float]) -> dict[str, float]:
