@@ -1,4 +1,5 @@
 import logging
+import queue
 import random
 import threading
 import time
@@ -69,10 +70,13 @@ class GossipBroker:
         self._seen_queue: deque[str] = deque(maxlen=self._seen_max)
         self._seen_set: Set[str] = set()
 
+        self._work_queue = queue.Queue()
+
         self._lock = threading.Lock()
 
         self.running = False
         self.recv_thread: Optional[threading.Thread] = None
+        self.worker_thread: Optional[threading.Thread] = None
         self.heartbeat_thread: Optional[threading.Thread] = None
         self.check_heartbeat_thread: Optional[threading.Thread] = None
 
@@ -81,6 +85,8 @@ class GossipBroker:
 
         self._snapshot_in_progress: Optional[str] = None
         self._snapshot_recorded_state: Optional[BrokerSnapshot] = None
+        self._snapshot_started_at: Optional[float] = None
+        self._snapshot_timeout: float = 30.0
         self._channels_recording: Dict[NodeAddress, List[GossipMessage]] = {}
         self._channels_closed: Set[NodeAddress] = set()
         self._peer_snapshots: Dict[NodeAddress, BrokerSnapshot] = {}
@@ -124,7 +130,8 @@ class GossipBroker:
                 self.last_seen[peer] = time.time()
             if is_new:
                 self.log.info(
-                    "peer discovered: %s", peer,
+                    "peer discovered: %s",
+                    peer,
                     extra={"event_type": "peer_joined"},
                 )
             else:
@@ -138,6 +145,13 @@ class GossipBroker:
             daemon=True,
         )
         self.recv_thread.start()
+
+        self.worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name=f"broker-{self.address.port}-worker",
+            daemon=True,
+        )
+        self.worker_thread.start()
 
         self.heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop,
@@ -170,6 +184,8 @@ class GossipBroker:
         self.running = False
         if self.recv_thread:
             self.recv_thread.join(timeout=2.0)
+        if self.worker_thread:
+            self.worker_thread.join(timeout=2.0)
         if self.heartbeat_thread:
             self.heartbeat_thread.join(timeout=2.0)
         if self.check_heartbeat_thread:
@@ -319,6 +335,7 @@ class GossipBroker:
                 snapshot_id = str(uuid.uuid4())
 
             self._snapshot_in_progress = snapshot_id
+            self._snapshot_started_at = time.time()
             self._snapshot_recorded_state = self._record_local_state(snapshot_id)
 
             self._channels_recording = {peer: [] for peer in self.peer_brokers}
@@ -378,6 +395,7 @@ class GossipBroker:
                     return
 
                 self._snapshot_in_progress = marker.snapshot_id
+                self._snapshot_started_at = time.time()
                 self._snapshot_recorded_state = self._record_local_state(
                     marker.snapshot_id
                 )
@@ -449,6 +467,7 @@ class GossipBroker:
 
             self._snapshot_in_progress = None
             self._snapshot_recorded_state = None
+            self._snapshot_started_at = None
             self._channels_recording.clear()
             self._channels_closed.clear()
 
@@ -518,6 +537,35 @@ class GossipBroker:
             len(snapshot.peer_brokers),
         )
 
+    def _check_snapshot_timeout(self) -> None:
+        with self._lock:
+            if self._snapshot_in_progress is None:
+                return
+            if self._snapshot_started_at is None:
+                return
+
+            elapsed = time.time() - self._snapshot_started_at
+            if elapsed < self._snapshot_timeout:
+                return
+
+            snapshot_id = self._snapshot_in_progress
+            expected = len(self._channels_recording)
+            closed = len(self._channels_closed)
+
+            self.log.warning(
+                "snapshot timed out snapshot_id=%s elapsed=%.2fs closed=%d/%d; clearing",
+                snapshot_id[:8],
+                elapsed,
+                closed,
+                expected,
+            )
+
+            self._snapshot_in_progress = None
+            self._snapshot_recorded_state = None
+            self._snapshot_started_at = None
+            self._channels_recording.clear()
+            self._channels_closed.clear()
+
     def _snapshot_timer_loop(self) -> None:
         """Background thread that periodically initiates snapshots.
 
@@ -536,6 +584,7 @@ class GossipBroker:
                 if not self.running:
                     return
                 time.sleep(0.1)
+                self._check_snapshot_timeout()
 
             with self._lock:
                 if not self.peer_brokers:
@@ -763,7 +812,7 @@ class GossipBroker:
 
             try:
                 if isinstance(msg, GossipMessage):
-                    self._handle_gossip_message(msg)
+                    self._work_queue.put(msg)
                 elif isinstance(msg, Heartbeat):
                     if sender is not None:
                         self.add_peer(sender)
@@ -806,7 +855,7 @@ class GossipBroker:
                     gossip_msg = GossipMessage(
                         msg=msg, msg_id=msg_id, ttl=self.ttl, source=self.address
                     )
-                    self._handle_gossip_message(gossip_msg)
+                    self._work_queue.put(gossip_msg)
                 else:
                     self.log.error(
                         "unknown message type %s from %s", type(msg).__name__, sender
@@ -814,6 +863,16 @@ class GossipBroker:
 
             except Exception:
                 self.log.error("error handling message from %s", sender, exc_info=True)
+
+    def _worker_loop(self) -> None:
+        while self.running:
+            try:
+                msg = self._work_queue.get(timeout=1.0)
+                self._handle_gossip_message(msg)
+            except queue.Empty:
+                continue
+            except Exception:
+                self.log.error("error in worker loop", exc_info=True)
 
     def _heartbeat_loop(self) -> None:
         sequence = 0
