@@ -36,6 +36,7 @@ from .models import (
     TriggerSnapshotRequest,
 )
 from .recovery import RecoveryManager
+from .bootstrap_client import deregister_from_bootstrap
 from .settings import settings
 from . import metrics
 
@@ -98,6 +99,10 @@ async def remove_broker(broker_id: int) -> ComponentResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except docker.errors.APIError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Deregister from bootstrap so peer lists stay clean
+    await deregister_from_bootstrap(info.hostname, info.internal_port, settings)
+
     await broadcaster.emit(EventType.BROKER_REMOVED, info.model_dump(mode="json"))
     await recovery_mgr.reassign_orphans(broker_id)
     return ComponentResponse(action="removed", component=info)
@@ -333,6 +338,10 @@ async def start_health_monitoring() -> None:
     health_monitor = HealthMonitor(
         components=docker_mgr._components,
         on_broker_dead=recovery_mgr.handle_broker_dead,
+        poll_interval=settings.health_broker_poll_interval,
+        failure_threshold=settings.health_broker_failure_threshold,
+        startup_grace_seconds=settings.health_broker_startup_grace_seconds,
+        request_timeout=settings.health_broker_request_timeout,
     )
     asyncio.create_task(health_monitor.run())
     asyncio.create_task(_metrics_updater())
@@ -345,12 +354,27 @@ async def _snapshot_monitor() -> None:
     Compares snapshot timestamps per broker across polls. When a broker's stored
     snapshot timestamp advances, a new snapshot cycle completed — emit the WS event
     so the dashboard can animate and refresh.
+
+    last_timestamps is seeded at startup so that pre-existing broker snapshots
+    (present when the orchestrator restarts) are not replayed as new events.
+    Snapshots taken by freshly created brokers (not in the initial state) always
+    emit on their first detection because their broker_address is absent from
+    last_timestamps until that moment.
     """
     last_timestamps: dict[str, float] = {}  # broker_address -> last seen timestamp
     loop = asyncio.get_event_loop()
 
+    # Seed baseline so pre-existing snapshots are not treated as new on startup.
+    try:
+        initial = await loop.run_in_executor(None, docker_mgr.get_snapshots)
+        for s in initial.brokers:
+            if s.timestamp is not None:
+                last_timestamps[s.broker_address] = s.timestamp
+    except Exception:
+        pass
+
     while True:
-        await asyncio.sleep(8)
+        await asyncio.sleep(settings.snapshot_monitor_poll_interval)
         try:
             data = await loop.run_in_executor(None, docker_mgr.get_snapshots)
             for s in data.brokers:
@@ -359,14 +383,16 @@ async def _snapshot_monitor() -> None:
                 prev = last_timestamps.get(s.broker_address)
                 if prev is None or s.timestamp > prev:
                     last_timestamps[s.broker_address] = s.timestamp
-                    if prev is not None:  # skip first observation — no "new" snapshot yet
-                        await broadcaster.emit(EventType.SNAPSHOT_COMPLETE, {
+                    await broadcaster.emit(
+                        EventType.SNAPSHOT_COMPLETE,
+                        {
                             "broker_id": s.broker_id,
                             "broker_address": s.broker_address,
                             "snapshot_id": s.snapshot_id,
                             "subscriber_count": s.subscriber_count,
                             "snapshot_timestamp": s.timestamp,
-                        })
+                        },
+                    )
         except Exception:
             pass
 
@@ -396,10 +422,13 @@ async def _metrics_updater() -> None:
     _seen_components: set[tuple[str, str]] = set()
 
     _POLL_INTERVAL = 1.0
+    loop = asyncio.get_running_loop()
 
     while True:
         try:
-            broker_metrics = docker_mgr.refresh_metrics_cache()
+            broker_metrics = await loop.run_in_executor(
+                None, docker_mgr.refresh_metrics_cache
+            )
 
             # --- Component up/down gauges -----------------------------------
             current_components: set[tuple[str, str]] = set()
