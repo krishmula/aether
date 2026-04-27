@@ -252,6 +252,26 @@ class TestRedistributionBalancing(unittest.IsolatedAsyncioTestCase):
         self.assertIn(assigned_to_1 + 1, [2, 2])  # broker1 total
         self.assertIn(assigned_to_2, [1, 2])  # broker2 total
 
+    async def test_redistribution_deregisters_from_bootstrap(self):
+        """Redistribution path calls deregister_from_bootstrap for dead broker."""
+        broker3 = _make_broker(3)
+        orphan1 = _make_subscriber(1, broker_id=3)
+        broker1 = _make_broker(1)
+        components = _components(broker1, broker3, orphan1)
+        docker_mgr = _mock_docker_mgr(components)
+        broadcaster = MagicMock()
+        broadcaster.emit = AsyncMock()
+        settings = _mock_settings()
+
+        recovery = RecoveryManager(docker_mgr, broadcaster, settings)
+
+        with patch(
+            "aether.orchestrator.recovery.deregister_from_bootstrap"
+        ) as mock_deregister:
+            await recovery._recover_redistribution(3, "recovery-456", time.time())
+
+            mock_deregister.assert_awaited_once_with("broker-3", 8000, settings)
+
 
 class TestReconnectMetrics(unittest.IsolatedAsyncioTestCase):
     """Subscriber reconnect metrics cover all recovery flows."""

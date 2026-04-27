@@ -327,11 +327,31 @@ class RecoveryManager:
             and info.component_id != broker_id
         ]
 
+        # Get dead broker address before removing container
+        dead_broker_info = self._docker_mgr._components.get(
+            f"aether-broker-{broker_id}"
+        )
+        dead_broker_host = dead_broker_info.hostname if dead_broker_info else None
+        dead_broker_port = dead_broker_info.internal_port if dead_broker_info else None
+
+        # Get dead broker address before removing container
+        dead_broker_info = self._docker_mgr._components.get(
+            f"aether-broker-{broker_id}"
+        )
+        dead_broker_host = dead_broker_info.hostname if dead_broker_info else None
+        dead_broker_port = dead_broker_info.internal_port if dead_broker_info else None
+
         # Remove the dead broker container
         try:
             self._docker_mgr.remove_broker(broker_id)
         except (ValueError, Exception):
             logger.debug("Dead broker %d container already removed", broker_id)
+
+        # Deregister from bootstrap so peer lists stay clean
+        if dead_broker_host and dead_broker_port:
+            await deregister_from_bootstrap(
+                dead_broker_host, dead_broker_port, self._settings
+            )
 
         if not surviving_brokers:
             # Terminal failure — the entire cluster is gone. Count and time it.
