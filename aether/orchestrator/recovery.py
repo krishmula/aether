@@ -6,6 +6,7 @@ import uuid
 import httpx
 
 from aether.orchestrator import metrics
+from aether.orchestrator.bootstrap_client import deregister_from_bootstrap
 from aether.orchestrator.models import (
     ComponentInfo,
     ComponentStatus,
@@ -222,17 +223,7 @@ class RecoveryManager:
             logger.debug("Dead broker %d container already removed", broker_id)
 
         # 2. Deregister from bootstrap so peer lists stay clean
-        bootstrap_status_port = self._settings.bootstrap_port + 10000
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.request(
-                    "DELETE",
-                    f"http://{self._settings.bootstrap_host}:{bootstrap_status_port}/deregister",
-                    json={"host": host, "port": port},
-                    timeout=2.0,
-                )
-        except Exception:
-            logger.debug("Bootstrap deregister failed (non-critical)")
+        await deregister_from_bootstrap(host, port, self._settings)
 
         # 3. Spin up replacement with the same broker_id
         info = self._docker_mgr.create_broker(CreateBrokerRequest(broker_id=broker_id))

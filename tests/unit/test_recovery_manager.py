@@ -36,9 +36,7 @@ def _make_broker(
     )
 
 
-def _make_subscriber(
-    subscriber_id: int, broker_id: int
-) -> ComponentInfo:
+def _make_subscriber(subscriber_id: int, broker_id: int) -> ComponentInfo:
     return ComponentInfo(
         component_type=ComponentType.SUBSCRIBER,
         component_id=subscriber_id,
@@ -76,9 +74,7 @@ def _mock_docker_mgr(components: dict[str, ComponentInfo]) -> MagicMock:
     mgr = MagicMock()
     mgr._components = components
     mgr.remove_broker = MagicMock()
-    mgr.create_broker = MagicMock(
-        side_effect=lambda req: _make_broker(req.broker_id)
-    )
+    mgr.create_broker = MagicMock(side_effect=lambda req: _make_broker(req.broker_id))
     return mgr
 
 
@@ -103,7 +99,8 @@ class TestDebounce(unittest.IsolatedAsyncioTestCase):
 
         # First call should have emitted BROKER_DECLARED_DEAD
         dead_calls = [
-            c for c in broadcaster.emit.call_args_list
+            c
+            for c in broadcaster.emit.call_args_list
             if c.args[0].value == "broker_declared_dead"
         ]
         self.assertEqual(len(dead_calls), 1)
@@ -112,7 +109,8 @@ class TestDebounce(unittest.IsolatedAsyncioTestCase):
         broadcaster.emit.reset_mock()
         await recovery.handle_broker_dead(1, "broker-1", 8000)
         dead_calls = [
-            c for c in broadcaster.emit.call_args_list
+            c
+            for c in broadcaster.emit.call_args_list
             if c.args[0].value == "broker_declared_dead"
         ]
         self.assertEqual(len(dead_calls), 0)
@@ -246,12 +244,8 @@ class TestRedistributionBalancing(unittest.IsolatedAsyncioTestCase):
         # broker2 had 0 subs, broker1 had 1 — least-loaded first
         # Expected: orphan1 → broker2 (0), orphan2 → broker1 (1) or broker2 (1),
         # then orphan3 to whichever has fewer
-        assigned_to_1 = sum(
-            1 for s in [orphan1, orphan2, orphan3] if s.broker_id == 1
-        )
-        assigned_to_2 = sum(
-            1 for s in [orphan1, orphan2, orphan3] if s.broker_id == 2
-        )
+        assigned_to_1 = sum(1 for s in [orphan1, orphan2, orphan3] if s.broker_id == 1)
+        assigned_to_2 = sum(1 for s in [orphan1, orphan2, orphan3] if s.broker_id == 2)
         # All 3 orphans should be reassigned (none left on broker 3)
         self.assertEqual(assigned_to_1 + assigned_to_2, 3)
         # With 1 existing on broker1, final counts should be balanced: 2 and 2
@@ -282,14 +276,14 @@ class TestReconnectMetrics(unittest.IsolatedAsyncioTestCase):
         with patch(
             "aether.orchestrator.metrics.subscriber_reconnects_total.inc"
         ) as inc:
-            with patch("httpx.AsyncClient") as MockClient:
+            with patch(
+                "aether.orchestrator.bootstrap_client.httpx.AsyncClient"
+            ) as MockClient:
                 mock_client = AsyncMock()
                 mock_client.request = AsyncMock()
                 mock_client.get = AsyncMock(return_value=MagicMock(status_code=200))
                 mock_client.post = AsyncMock(return_value=MagicMock(status_code=200))
-                MockClient.return_value.__aenter__ = AsyncMock(
-                    return_value=mock_client
-                )
+                MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
                 MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
 
                 await recovery._recover_replacement(
@@ -348,7 +342,9 @@ class TestFetchBestSnapshotPicksFreshest(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             return resp
 
-        with patch("httpx.AsyncClient") as MockClient:
+        with patch(
+            "aether.orchestrator.bootstrap_client.httpx.AsyncClient"
+        ) as MockClient:
             mock_client = AsyncMock()
             mock_client.get = mock_get
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
