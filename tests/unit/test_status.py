@@ -221,6 +221,50 @@ class TestStatusServer(unittest.TestCase):
             server.stop()
             broker.network.close()
 
+    # ------------------------------------------------------------------ #
+    # Test 5a — latest_snapshot field                                      #
+    # ------------------------------------------------------------------ #
+
+    def test_latest_snapshot_null_initially(self) -> None:
+        """latest_snapshot is None before any snapshot completes."""
+        broker, server, port = self._make_broker_and_server()
+        server.start()
+        try:
+            _, data = _get(port, "/status")
+            self.assertIn("latest_snapshot", data)
+            self.assertIsNone(data["latest_snapshot"])
+        finally:
+            server.stop()
+            broker.network.close()
+
+    def test_latest_snapshot_populated_after_completion(self) -> None:
+        """latest_snapshot reflects the most recently completed local snapshot."""
+        import time
+        from aether.snapshot import BrokerSnapshot
+
+        broker, server, port = self._make_broker_and_server()
+        server.start()
+        try:
+            snap = BrokerSnapshot(
+                snapshot_id="snap-abc",
+                broker_address=broker.address,
+                peer_brokers={NodeAddress("127.0.0.1", _free_port())},
+                remote_subscribers={},
+                seen_message_ids=set(),
+                timestamp=time.time(),
+            )
+            with broker._lock:
+                broker._latest_local_snapshot = snap
+
+            _, data = _get(port, "/status")
+            self.assertIsNotNone(data["latest_snapshot"])
+            self.assertEqual(data["latest_snapshot"]["snapshot_id"], "snap-abc")
+            self.assertIn("timestamp", data["latest_snapshot"])
+            self.assertIsInstance(data["latest_snapshot"]["timestamp"], float)
+        finally:
+            server.stop()
+            broker.network.close()
+
 
 class TestBootstrapStatusServer(unittest.TestCase):
     """Tests for BootstrapStatusServer / _BootstrapStatusHandler."""

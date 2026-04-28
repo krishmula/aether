@@ -82,6 +82,35 @@ class TestSnapshotTimeout(unittest.TestCase):
         finally:
             broker.network.close()
 
+    def test_latest_local_snapshot_set_on_completion(self) -> None:
+        broker = self._make_broker()
+        try:
+            import time
+            from aether.snapshot import BrokerSnapshot
+
+            snap = BrokerSnapshot(
+                snapshot_id="snap-xyz",
+                broker_address=broker.address,
+                peer_brokers=set(),
+                remote_subscribers={},
+                seen_message_ids=set(),
+                timestamp=time.time(),
+            )
+            with broker._lock:
+                broker._snapshot_in_progress = "snap-xyz"
+                broker._snapshot_recorded_state = snap
+                broker._channels_recording = {}
+                broker._channels_closed = set()
+
+            broker._check_snapshot_complete()
+
+            with broker._lock:
+                self.assertIsNotNone(broker._latest_local_snapshot)
+                self.assertEqual(broker._latest_local_snapshot.snapshot_id, "snap-xyz")
+                self.assertIsNone(broker._snapshot_in_progress)
+        finally:
+            broker.network.close()
+
 
 if __name__ == "__main__":
     unittest.main()
