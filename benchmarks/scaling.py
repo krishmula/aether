@@ -56,8 +56,9 @@ async def _measure_scaling_step(
 ) -> list[dict[str, Any]]:
     expected_topology = await client.get_topology_fingerprint()
     metrics = await client.get_metrics()
-    client.assert_valid_metrics_snapshot(metrics, stage="scaling measurement")
     expected_generation = metrics["topology_generation"]
+    metrics = await client.wait_for_metrics_generation(expected_generation)
+    client.assert_valid_metrics_snapshot(metrics, stage="scaling measurement")
 
     samples = await collect_throughput(
         client,
@@ -138,6 +139,7 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             attempt_used = 0
             last_error: RuntimeError | None = None
 
+            step_failed = False
             for attempt in range(1, max_attempts + 1):
                 attempt_used = attempt
                 try:
@@ -150,10 +152,25 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 except RuntimeError as exc:
                     last_error = exc
                     if attempt >= max_attempts:
-                        raise RuntimeError(
-                            "scaling step invalid after retry budget at "
-                            f"{current_publishers} publishers: {exc}"
-                        ) from exc
+                        logger.warning(
+                            "scaling step invalid after %d attempt(s) at "
+                            "%d publisher(s), stopping ramp: %s",
+                            attempt,
+                            current_publishers,
+                            exc,
+                        )
+                        timeline.append(
+                            {
+                                "elapsed": round(time.monotonic() - start, 1),
+                                "publishers": current_publishers,
+                                "mean_msgs_per_sec": None,
+                                "status": "invalid",
+                                "attempts": attempt_used,
+                                "invalid_reason": str(exc),
+                            }
+                        )
+                        step_failed = True
+                        break
 
                     logger.warning(
                         "scaling step invalid, retrying after %.1fs: %s",
@@ -162,12 +179,8 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                     )
                     await asyncio.sleep(cfg.scaling_retry_backoff_seconds)
 
-            if samples is None:
-                raise RuntimeError(
-                    "scaling step failed without samples"
-                    if last_error is None
-                    else str(last_error)
-                )
+            if step_failed:
+                break
 
             rates = [s["msgs_per_sec"] for s in samples]
             if rates:
@@ -179,6 +192,9 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 "elapsed": round(time.monotonic() - start, 1),
                 "publishers": current_publishers,
                 "mean_msgs_per_sec": round(mean_rate, 1),
+                "unique_msgs_per_sec_estimate": round(
+                    mean_rate / cfg.publisher_redundancy, 1
+                ),
                 "attempts": attempt_used,
                 "samples": samples,
             }
@@ -207,10 +223,13 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 # Brief pause for the new publisher to start.
                 await asyncio.sleep(3)
             except Exception as exc:
-                raise RuntimeError(
-                    "scaling publisher startup timeout at "
-                    f"{current_publishers} publishers: {exc}"
-                ) from exc
+                logger.warning(
+                    "scaling publisher startup failed at %d publishers, "
+                    "stopping ramp: %s",
+                    current_publishers,
+                    exc,
+                )
+                break
 
     finally:
         await client.cleanup()
@@ -231,6 +250,11 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             "max_publishers": cfg.scaling_max_publishers,
             "subscribers": cfg.scaling_subscribers,
             "step_seconds": cfg.scaling_step_seconds,
+            "publisher_redundancy": cfg.publisher_redundancy,
+            "throughput_note": (
+                "mean_msgs_per_sec is broker-mesh throughput (counts each redundant "
+                "delivery); divide by publisher_redundancy for unique msgs/s"
+            ),
         },
         "timeline": timeline,
         "publisher_additions": publisher_additions,

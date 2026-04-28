@@ -54,12 +54,30 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             logger.info(
                 "  observing %d snapshot rounds...", cfg.snapshot_rounds
             )
-            async with event_stream(cfg) as events:
-                rounds = await collect_snapshot_events(
-                    events,
-                    rounds=cfg.snapshot_rounds,
-                    timeout_per_round=30.0,
+            try:
+                async with event_stream(cfg) as events:
+                    rounds = await collect_snapshot_events(
+                        events,
+                        rounds=cfg.snapshot_rounds,
+                        timeout_per_round=cfg.snapshot_timeout_per_round,
+                        expected_brokers=n_brokers,
+                    )
+            except RuntimeError as exc:
+                logger.warning(
+                    "  invalid snapshot capture for %d brokers: %s",
+                    n_brokers,
+                    exc,
                 )
+                results.append(
+                    {
+                        "brokers": n_brokers,
+                        "subscribers": n_subscribers,
+                        "status": "invalid",
+                        "invalid_reason": str(exc),
+                        "rounds": [],
+                    }
+                )
+                continue
 
             coordination_times = [r["coordination_ms"] for r in rounds]
             if coordination_times:

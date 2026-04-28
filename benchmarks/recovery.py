@@ -31,6 +31,39 @@ async def _wait_for_snapshot(
     return None
 
 
+async def _wait_for_stale_snapshots(
+    client: AetherClient,
+    stale_seconds: float,
+    timeout: float,
+    poll_interval: float = 3.0,
+) -> bool:
+    """Poll /api/snapshots until every broker snapshot is older than stale_seconds.
+
+    Returns True when confirmed stale, False if the timeout expires first.
+    With snapshot_interval=90s and stale_seconds=50s, this resolves within
+    ~50s and the next snapshot cycle won't fire for another 40s — giving
+    a clean window in which the orchestrator's recovery manager will choose
+    Path B (redistribution).
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            data = await client.get_snapshots()
+            broker_snaps = data.get("brokers", [])
+            if broker_snaps:
+                ages = [
+                    s["age_seconds"]
+                    for s in broker_snaps
+                    if s.get("age_seconds") is not None
+                ]
+                if ages and all(age > stale_seconds for age in ages):
+                    return True
+        except Exception as exc:
+            logger.debug("snapshot staleness poll failed: %s", exc)
+        await asyncio.sleep(poll_interval)
+    return False
+
+
 async def _run_trial(
     client: AetherClient,
     cfg: BenchmarkConfig,
@@ -44,32 +77,51 @@ async def _run_trial(
     For Path B: wait past the configured snapshot freshness threshold so it is stale.
     """
     target_path = "A" if path_a else "B"
+    expected_path = "replacement" if path_a else "redistribution"
     logger.info(
         "  trial %d (target: Path %s) — waiting for snapshot...",
         trial, target_path,
     )
 
-    snap_ts = await _wait_for_snapshot(events, timeout=45.0)
-    if snap_ts is None:
-        logger.warning(
-            "  trial %d — no snapshot observed, triggering chaos anyway",
-            trial,
-        )
-    else:
-        if path_a:
-            # Trigger chaos quickly after snapshot (fresh snapshot -> Path A).
-            delay = cfg.recovery_path_a_delay_seconds
-        else:
-            # Wait until the snapshot is comfortably stale (Path B).
-            delay = (
-                cfg.recovery_snapshot_max_age_seconds
-                + cfg.recovery_stale_margin_seconds
+    if path_a:
+        # Wait for a fresh snapshot via WS event, then trigger chaos quickly.
+        snap_ts = await _wait_for_snapshot(events, timeout=cfg.recovery_path_a_snapshot_wait_seconds)
+        if snap_ts is not None:
+            logger.info(
+                "  trial %d — snapshot seen, waiting %.0fs before chaos...",
+                trial,
+                cfg.recovery_path_a_delay_seconds,
             )
-        logger.info(
-            "  trial %d — snapshot seen, waiting %.0fs before chaos...",
-            trial, delay,
+            await asyncio.sleep(cfg.recovery_path_a_delay_seconds)
+        else:
+            logger.warning(
+                "  trial %d — no snapshot observed, triggering chaos anyway",
+                trial,
+            )
+    else:
+        # Poll /api/snapshots directly until all broker snapshots are confirmed
+        # stale. With snapshot_interval=90s and stale_threshold=50s, this
+        # settles cleanly — the next snapshot cycle is still 40s away.
+        stale_threshold = (
+            cfg.recovery_snapshot_max_age_seconds + cfg.recovery_stale_margin_seconds
         )
-        await asyncio.sleep(delay)
+        logger.info(
+            "  trial %d — waiting for all snapshots to be >%.0fs old...",
+            trial,
+            stale_threshold,
+        )
+        achieved = await _wait_for_stale_snapshots(
+            client,
+            stale_threshold,
+            timeout=stale_threshold * 3,
+            poll_interval=cfg.recovery_snapshot_poll_interval,
+        )
+        if not achieved:
+            logger.warning(
+                "  trial %d — snapshot staleness not confirmed within timeout, "
+                "triggering anyway",
+                trial,
+            )
 
     # Drain any queued events before triggering chaos.
     while not events.empty():
@@ -93,12 +145,39 @@ async def _run_trial(
         }
 
     # Collect recovery events.
-    recovery = await collect_recovery_events(events, timeout=60.0)
+    try:
+        recovery = await collect_recovery_events(events, timeout=60.0)
+    except RuntimeError as exc:
+        return {
+            "trial": trial,
+            "target_path": target_path,
+            "expected_path": expected_path,
+            "status": "invalid",
+            "chaos_target": chaos_target,
+            "invalid_reason": str(exc),
+        }
+
+    actual_path = recovery.get("recovery_path")
+    if actual_path != expected_path:
+        return {
+            "trial": trial,
+            "target_path": target_path,
+            "expected_path": expected_path,
+            "actual_path": actual_path,
+            "status": "invalid",
+            "chaos_target": chaos_target,
+            "invalid_reason": (
+                "recovery path mismatch: expected "
+                f"{expected_path}, observed {actual_path}"
+            ),
+            **recovery,
+        }
 
     result = {
         "trial": trial,
         "target_path": target_path,
-        "actual_path": recovery.get("recovery_path"),
+        "expected_path": expected_path,
+        "actual_path": actual_path,
         "status": "ok",
         "chaos_target": chaos_target,
         **recovery,
@@ -134,7 +213,7 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             "recovery: seeding topology (3 brokers, 2 pubs, 3 subs)"
         )
         await client.seed_topology(3, 2, 3)
-        await client.wait_all_running(timeout=60)
+        await client.wait_all_running(timeout=cfg.recovery_startup_timeout)
 
         logger.info("recovery: warmup (%ds)...", cfg.warmup_seconds)
         await asyncio.sleep(cfg.warmup_seconds)
@@ -163,8 +242,16 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
         await client.close()
 
     # Summarize by path.
-    path_a_trials = [t for t in trials if t.get("actual_path") == "replacement"]
-    path_b_trials = [t for t in trials if t.get("actual_path") == "redistribution"]
+    path_a_trials = [
+        t
+        for t in trials
+        if t.get("status") == "ok" and t.get("actual_path") == "replacement"
+    ]
+    path_b_trials = [
+        t
+        for t in trials
+        if t.get("status") == "ok" and t.get("actual_path") == "redistribution"
+    ]
 
     def _summarize(group: list[dict]) -> dict[str, Any]:
         recovery_times = [t["recovery_time_s"] for t in group if "recovery_time_s" in t]
@@ -192,6 +279,10 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             "path_a_replacement": _summarize(path_a_trials),
             "path_b_redistribution": _summarize(path_b_trials),
             "total_trials": len(trials),
+            "valid_trials": len([t for t in trials if t.get("status") == "ok"]),
+            "invalid_trials": len(
+                [t for t in trials if t.get("status") == "invalid"]
+            ),
         },
     }
 

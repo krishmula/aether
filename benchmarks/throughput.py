@@ -27,8 +27,9 @@ async def _measure_throughput_attempt(
 ) -> list[dict[str, Any]]:
     expected_topology = await client.get_topology_fingerprint()
     metrics = await client.get_metrics()
-    client.assert_valid_metrics_snapshot(metrics, stage="throughput warmup")
     expected_generation = metrics["topology_generation"]
+    metrics = await client.wait_for_metrics_generation(expected_generation)
+    client.assert_valid_metrics_snapshot(metrics, stage="throughput warmup")
 
     logger.info("  warmup (%ds)...", cfg.warmup_seconds)
     await asyncio.sleep(cfg.warmup_seconds)
@@ -144,6 +145,9 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                         "status": "ok",
                         "attempts": attempt,
                         "stats": stats,
+                        "unique_msgs_per_sec_estimate": round(
+                            stats["mean"] / cfg.publisher_redundancy, 1
+                        ),
                         "samples": samples,
                     }
                     results.append(entry)
@@ -169,6 +173,11 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             "publisher_counts": cfg.publisher_counts,
             "warmup_seconds": cfg.warmup_seconds,
             "measurement_seconds": cfg.measurement_seconds,
+            "publisher_redundancy": cfg.publisher_redundancy,
+            "throughput_note": (
+                "msgs_per_sec is broker-mesh throughput (counts each redundant "
+                "delivery); divide by publisher_redundancy for unique msgs/s"
+            ),
         },
         "results": results,
     }

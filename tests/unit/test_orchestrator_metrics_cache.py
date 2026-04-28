@@ -32,10 +32,40 @@ def _make_broker(broker_id: int) -> ComponentInfo:
         component_type=ComponentType.BROKER,
         component_id=broker_id,
         container_name=f"aether-broker-{broker_id}",
+        container_id=f"broker-container-{broker_id}",
         hostname=f"broker-{broker_id}",
         internal_port=8000,
         internal_status_port=18000,
         status=ComponentStatus.RUNNING,
+        created_at=datetime.now(UTC),
+    )
+
+
+def _make_publisher(publisher_id: int) -> ComponentInfo:
+    return ComponentInfo(
+        component_type=ComponentType.PUBLISHER,
+        component_id=publisher_id,
+        container_name=f"aether-publisher-{publisher_id}",
+        container_id=f"publisher-container-{publisher_id}",
+        hostname=f"publisher-{publisher_id}",
+        internal_port=9000,
+        internal_status_port=19000,
+        status=ComponentStatus.RUNNING,
+        created_at=datetime.now(UTC),
+    )
+
+
+def _make_subscriber(subscriber_id: int, broker_id: int) -> ComponentInfo:
+    return ComponentInfo(
+        component_type=ComponentType.SUBSCRIBER,
+        component_id=subscriber_id,
+        container_name=f"aether-subscriber-{subscriber_id}",
+        container_id=f"subscriber-container-{subscriber_id}",
+        hostname=f"subscriber-{subscriber_id}",
+        internal_port=9100,
+        internal_status_port=19100,
+        status=ComponentStatus.RUNNING,
+        broker_id=broker_id,
         created_at=datetime.now(UTC),
     )
 
@@ -131,7 +161,9 @@ class TestMetricsCacheRefresh:
         assert second.throughput_msgs_per_sec == 60.0
         assert second.fetched_at == 1_700_000_101.0
 
-    def test_topology_mutation_advances_generation_and_resets_cached_sample(self) -> None:
+    def test_topology_mutation_advances_generation_and_resets_cached_sample(
+        self,
+    ) -> None:
         manager = _make_manager()
         manager._metrics_cache = MetricsResponse(
             total_messages_processed=75,
@@ -163,8 +195,34 @@ class TestMetricsCacheRefresh:
 
         cached_after_remove = manager.get_metrics()
         assert cached_after_remove.topology_generation == 2
-        removed_container.stop.assert_called_once_with(timeout=10)
+        removed_container.stop.assert_called_once_with(timeout=1)
         removed_container.remove.assert_called_once()
+
+    def test_all_component_removals_use_fast_stop_timeout(self) -> None:
+        manager = _make_manager()
+        broker = _make_broker(1)
+        publisher = _make_publisher(2)
+        subscriber = _make_subscriber(3, broker_id=1)
+        manager._components = {
+            broker.container_name: broker,
+            publisher.container_name: publisher,
+            subscriber.container_name: subscriber,
+        }
+
+        publisher_container = MagicMock()
+        subscriber_container = MagicMock()
+        manager.client.containers.get.side_effect = [
+            publisher_container,
+            subscriber_container,
+        ]
+
+        manager.remove_publisher(publisher.component_id)
+        manager.remove_subscriber(subscriber.component_id)
+
+        publisher_container.stop.assert_called_once_with(timeout=1)
+        publisher_container.remove.assert_called_once()
+        subscriber_container.stop.assert_called_once_with(timeout=1)
+        subscriber_container.remove.assert_called_once()
 
 
 class TestMetricsEndpointReadPath:

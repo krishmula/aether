@@ -46,7 +46,7 @@ class AetherClient:
             await asyncio.sleep(1.0)
         raise RuntimeError(
             f"Orchestrator not reachable at {self.base} after {timeout}s. "
-            "Is the system running?  Run 'make demo' first."
+            "Is the system running? Run 'make benchmark' or 'make demo' first."
         )
 
     # ------------------------------------------------------------------
@@ -171,6 +171,11 @@ class AetherClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_snapshots(self) -> dict[str, Any]:
+        resp = await self._http.get("/api/snapshots")
+        resp.raise_for_status()
+        return resp.json()
+
     def assert_valid_metrics_snapshot(
         self,
         metrics: dict[str, Any],
@@ -224,6 +229,7 @@ class AetherClient:
             if (
                 metrics.get("topology_generation") == expected_generation
                 and metrics.get("fetched_at", 0) > 0
+                and metrics.get("sample_interval_seconds", 0) > 0
             ):
                 return metrics
             await asyncio.sleep(poll_interval)
@@ -326,6 +332,8 @@ class AetherClient:
         async def _delete(path: str, label: str) -> None:
             try:
                 resp = await self._http.delete(path)
+                if resp.status_code == 404:
+                    return
                 resp.raise_for_status()
             except Exception as exc:
                 failures.append(f"{label}: {exc}")
@@ -423,6 +431,14 @@ class AetherClient:
             except Exception as exc:
                 ready_polls = 0
                 last_reason = f"failed to query readiness metrics: {exc}"
+                await asyncio.sleep(poll_interval)
+                continue
+
+            fetched_at = metrics.get("fetched_at", 0)
+            sample_interval = metrics.get("sample_interval_seconds", 0)
+            if fetched_at <= 0 or sample_interval <= 0:
+                ready_polls = 0
+                last_reason = "waiting for first fresh metrics sample"
                 await asyncio.sleep(poll_interval)
                 continue
 

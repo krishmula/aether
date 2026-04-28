@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from benchmarks.collectors import (
     classify_latency_window,
+    classify_snapshot_round,
     classify_throughput_window,
     collect_recovery_events,
     collect_snapshot_events,
@@ -178,6 +179,129 @@ class TestEventCollectors(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "incomplete snapshot rounds",
+            "invalid snapshot round: snapshot round missing snapshot_id",
         ):
             await collect_snapshot_events(events, rounds=2, timeout_per_round=0.01)
+
+    async def test_collect_snapshot_events_skips_initial_partial_round(self) -> None:
+        events: asyncio.Queue[dict] = asyncio.Queue()
+        events.put_nowait(
+            {
+                "type": "snapshot_complete",
+                "timestamp": 10.0,
+                "data": {
+                    "broker_id": 2,
+                    "snapshot_id": "stale-round",
+                    "snapshot_timestamp": 10.0,
+                },
+            }
+        )
+        for broker_id, ts in ((1, 20.0), (2, 20.1), (3, 20.2)):
+            events.put_nowait(
+                {
+                    "type": "snapshot_complete",
+                    "timestamp": ts,
+                    "data": {
+                        "broker_id": broker_id,
+                        "snapshot_id": "round-1",
+                        "snapshot_timestamp": ts,
+                    },
+                }
+            )
+
+        rounds = await collect_snapshot_events(
+            events,
+            rounds=1,
+            timeout_per_round=0.01,
+            expected_brokers=3,
+        )
+
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["broker_count"], 3)
+        self.assertEqual(rounds[0]["snapshot_id"], "round-1")
+
+    async def test_collect_snapshot_events_rejects_duplicate_broker_completion(
+        self,
+    ) -> None:
+        events: asyncio.Queue[dict] = asyncio.Queue()
+        for broker_id, ts in ((1, 10.0), (1, 10.1), (2, 10.2)):
+            events.put_nowait(
+                {
+                    "type": "snapshot_complete",
+                    "timestamp": ts,
+                    "data": {
+                        "broker_id": broker_id,
+                        "snapshot_id": "round-1",
+                        "snapshot_timestamp": ts,
+                    },
+                }
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            (
+                "invalid snapshot round: snapshot round contains duplicate "
+                "broker completions"
+            ),
+        ):
+            await collect_snapshot_events(
+                events,
+                rounds=1,
+                timeout_per_round=0.01,
+                expected_brokers=3,
+            )
+
+    async def test_collect_recovery_events_rejects_out_of_order_timeline(self) -> None:
+        events: asyncio.Queue[dict] = asyncio.Queue()
+        events.put_nowait({"type": "broker_declared_dead", "timestamp": 10.0})
+        events.put_nowait(
+            {
+                "type": "subscriber_reconnected",
+                "timestamp": 10.5,
+            }
+        )
+        events.put_nowait(
+            {
+                "type": "broker_recovery_started",
+                "timestamp": 11.0,
+                "data": {"recovery_path": "replacement"},
+            }
+        )
+        events.put_nowait(
+            {
+                "type": "broker_recovered",
+                "timestamp": 12.0,
+                "data": {"recovery_path": "replacement"},
+            }
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "invalid recovery event timeline",
+        ):
+            await collect_recovery_events(events, timeout=0.05)
+
+
+class TestClassifySnapshotRound(unittest.TestCase):
+    def test_rejects_mixed_snapshot_ids(self) -> None:
+        reason = classify_snapshot_round(
+            [
+                {
+                    "data": {
+                        "broker_id": 1,
+                        "snapshot_id": "round-1",
+                        "snapshot_timestamp": 10.0,
+                    }
+                },
+                {
+                    "data": {
+                        "broker_id": 2,
+                        "snapshot_id": "round-2",
+                        "snapshot_timestamp": 10.1,
+                    }
+                },
+            ],
+            expected_brokers=2,
+        )
+
+        self.assertIn("mixed snapshot ids", reason)

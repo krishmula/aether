@@ -31,6 +31,9 @@ def _fake_client() -> MagicMock:
         return_value={"brokers": {1: "running"}}
     )
     client.get_metrics = AsyncMock(return_value=_metrics_snapshot())
+    client.wait_for_metrics_generation = AsyncMock(
+        return_value=_metrics_snapshot()
+    )
     client.assert_valid_metrics_snapshot = MagicMock()
     client.assert_metrics_generation = AsyncMock()
     client.assert_topology_matches = AsyncMock()
@@ -42,6 +45,36 @@ def _fake_client() -> MagicMock:
 
 
 class TestThroughputPhase4(unittest.IsolatedAsyncioTestCase):
+    async def test_measure_waits_for_fresh_metrics_generation_before_warmup(
+        self,
+    ) -> None:
+        from benchmarks import throughput
+
+        cfg = BenchmarkConfig(warmup_seconds=0, measurement_seconds=1)
+        client = _fake_client()
+        client.wait_for_metrics_generation = AsyncMock(return_value=_metrics_snapshot())
+
+        with (
+            patch(
+                "benchmarks.throughput.collect_throughput",
+                new=AsyncMock(
+                    return_value=[
+                        {"msgs_per_sec": 50.0},
+                        {"msgs_per_sec": 55.0},
+                        {"msgs_per_sec": 60.0},
+                    ]
+                ),
+            ),
+            patch("benchmarks.throughput.asyncio.sleep", new=AsyncMock()),
+        ):
+            await throughput._measure_throughput_attempt(
+                client,
+                cfg,
+                n_publishers=1,
+            )
+
+        client.wait_for_metrics_generation.assert_awaited_once()
+
     async def test_run_retries_invalid_row_then_succeeds(self) -> None:
         from benchmarks import throughput
 

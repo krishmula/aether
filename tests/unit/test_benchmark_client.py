@@ -6,6 +6,8 @@ import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from benchmarks.client import AetherClient
 from benchmarks.config import BenchmarkConfig
 
@@ -22,7 +24,16 @@ class TestBenchmarkMetricsGenerationHelpers(unittest.IsolatedAsyncioTestCase):
             side_effect=[
                 {"topology_generation": 1, "fetched_at": 0},
                 {"topology_generation": 2, "fetched_at": 0},
-                {"topology_generation": 2, "fetched_at": 1_700_000_100.0},
+                {
+                    "topology_generation": 2,
+                    "fetched_at": 1_700_000_100.0,
+                    "sample_interval_seconds": 0.0,
+                },
+                {
+                    "topology_generation": 2,
+                    "fetched_at": 1_700_000_101.0,
+                    "sample_interval_seconds": 1.0,
+                },
             ]
         )
 
@@ -33,7 +44,8 @@ class TestBenchmarkMetricsGenerationHelpers(unittest.IsolatedAsyncioTestCase):
         )
 
         assert metrics["topology_generation"] == 2
-        assert metrics["fetched_at"] == 1_700_000_100.0
+        assert metrics["fetched_at"] == 1_700_000_101.0
+        assert metrics["sample_interval_seconds"] == 1.0
 
     async def test_assert_metrics_generation_raises_on_drift(self) -> None:
         self.client = AetherClient(BenchmarkConfig())
@@ -130,6 +142,59 @@ class TestBenchmarkMetricsContract(unittest.IsolatedAsyncioTestCase):
                     poll_interval=0,
                 )
 
+    async def test_wait_latency_ready_tolerates_cold_metrics_until_sampler_ready(
+        self,
+    ) -> None:
+        self.client = AetherClient(BenchmarkConfig())
+        self.client.get_state = AsyncMock(  # type: ignore[method-assign]
+            return_value={"subscribers": [{"component_id": 1}]}
+        )
+        self.client.get_metrics = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                {
+                    "topology_generation": 1,
+                    "fetched_at": 0.0,
+                    "sample_interval_seconds": 0.0,
+                    "total_messages_processed": 0,
+                    "subscribers": [],
+                },
+                {
+                    "topology_generation": 1,
+                    "fetched_at": time.time(),
+                    "sample_interval_seconds": 1.0,
+                    "total_messages_processed": 5,
+                    "subscribers": [
+                        {
+                            "subscriber_id": 1,
+                            "total_received": 5,
+                            "latency_us": {"sample_count": 5},
+                        }
+                    ],
+                },
+                {
+                    "topology_generation": 1,
+                    "fetched_at": time.time(),
+                    "sample_interval_seconds": 1.0,
+                    "total_messages_processed": 10,
+                    "subscribers": [
+                        {
+                            "subscriber_id": 1,
+                            "total_received": 10,
+                            "latency_us": {"sample_count": 10},
+                        }
+                    ],
+                },
+            ]
+        )
+
+        await self.client.wait_latency_ready(
+            expected_subscribers=1,
+            min_samples_per_subscriber=1,
+            stable_polls=1,
+            timeout=0.1,
+            poll_interval=0,
+        )
+
 
 class TestBenchmarkSeedTopology(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
@@ -175,3 +240,29 @@ class TestBenchmarkSeedTopology(unittest.IsolatedAsyncioTestCase):
 
         self.client._create_publisher.assert_awaited_once()
         self.client._create_subscriber.assert_awaited_once()
+
+
+class TestBenchmarkCleanup(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self) -> None:
+        client = getattr(self, "client", None)
+        if client is not None:
+            await client.close()
+
+    async def test_cleanup_treats_delete_404_as_already_removed(self) -> None:
+        """Concurrent recovery may remove a broker before benchmark cleanup runs."""
+        self.client = AetherClient(BenchmarkConfig())
+        self.client._http.delete = AsyncMock(  # type: ignore[method-assign]
+            return_value=httpx.Response(404)
+        )
+        self.client.get_state = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                {
+                    "brokers": [{"component_id": 1}],
+                    "publishers": [],
+                    "subscribers": [],
+                },
+                {"brokers": [], "publishers": [], "subscribers": []},
+            ]
+        )
+
+        await self.client.cleanup(timeout=2.0)

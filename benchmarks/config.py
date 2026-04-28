@@ -53,15 +53,21 @@ class BenchmarkConfig:
     latency_publishers: int = 2
     latency_subscribers: int = 3
     latency_publish_interval: float = 0.05
-    latency_ready_timeout_seconds: float = 30.0
-    latency_ready_poll_interval: float = 1.0
+    latency_ready_timeout_seconds: float = 60.0
+    latency_ready_poll_interval: float = 2.0
     latency_ready_consecutive_polls: int = 3
     latency_min_samples_per_subscriber: int = 20
     latency_min_delivery_ratio: float = 0.7
 
     # Snapshot benchmark
     snapshot_broker_counts: list[int] = field(default_factory=lambda: [3, 5, 7, 10])
-    snapshot_rounds: int = 3
+    snapshot_rounds: int = 2
+    # Must exceed snapshot_interval (90s) + container/process startup time.
+    # With up to ~40s for the Python process to initialize inside Docker,
+    # the first snapshot can arrive up to ~135s after containers are created.
+    # Collection starts ~12s after containers are created, so the worst-case
+    # wait from collection start is ~123s — use 240s to give ample headroom.
+    snapshot_timeout_per_round: float = 240.0
 
     # Recovery benchmark
     recovery_trials: int = 5
@@ -71,6 +77,22 @@ class BenchmarkConfig:
         default_factory=_default_recovery_snapshot_max_age
     )
     recovery_stale_margin_seconds: float = 5.0
+    recovery_snapshot_poll_interval: float = 3.0
+    # snapshot_interval=90s: Path A must wait up to 90s for the first snapshot.
+    recovery_path_a_snapshot_wait_seconds: float = 100.0
+    # Startup timeout for wait_all_running during recovery re-seeds; longer than
+    # the default 60s to accommodate Docker resource pressure mid-benchmark.
+    recovery_startup_timeout: float = 120.0
+
+    publisher_redundancy: int = 2
+
+    # Phase 7 verification gate
+    verification_proof_brokers: int = 3
+    verification_proof_publishers: int = 2
+    verification_proof_warmup_seconds: int = 5
+    verification_proof_measurement_seconds: int = 15
+    verification_metrics_reader_poll_interval: float = 0.2
+    verification_max_throughput_drift_pct: float = 20.0
 
     # Scaling benchmark
     scaling_brokers: int = 3

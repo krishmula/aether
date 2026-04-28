@@ -237,7 +237,8 @@ async def collect_recovery_events(
     t_dead: float | None = None
     t_recovery_started: float | None = None
     t_recovered: float | None = None
-    recovery_path: str | None = None
+    recovery_path_started: str | None = None
+    recovery_path_recovered: str | None = None
     reconnect_times: list[float] = []
 
     deadline = asyncio.get_event_loop().time() + timeout
@@ -257,20 +258,28 @@ async def collect_recovery_events(
             t_dead = ts
         elif etype == "broker_recovery_started" and t_recovery_started is None:
             t_recovery_started = ts
-            recovery_path = event.get("data", {}).get("recovery_path")
+            recovery_path_started = event.get("data", {}).get("recovery_path")
         elif etype == "broker_recovered" and t_recovered is None:
             t_recovered = ts
-            if recovery_path is None:
-                recovery_path = event.get("data", {}).get("recovery_path")
+            recovery_path_recovered = event.get("data", {}).get("recovery_path")
         elif etype == "subscriber_reconnected":
             reconnect_times.append(ts)
 
-    result: dict[str, Any] = {"recovery_path": recovery_path}
+    recovery_path = recovery_path_started or recovery_path_recovered
+    result: dict[str, Any] = {
+        "recovery_path": recovery_path,
+        "subscriber_reconnect_count": len(reconnect_times),
+    }
 
-    if t_dead is not None and t_recovered is not None:
-        result["detection_time_s"] = round(
-            (t_recovery_started or t_recovered) - t_dead, 3
+    if t_dead is not None and t_recovery_started is not None:
+        result["failover_start_latency_s"] = round(
+            t_recovery_started - t_dead, 3
         )
+    if t_recovery_started is not None and t_recovered is not None:
+        result["recovery_execution_time_s"] = round(
+            t_recovered - t_recovery_started, 3
+        )
+    if t_dead is not None and t_recovered is not None:
         result["recovery_time_s"] = round(t_recovered - t_dead, 3)
     if t_dead is not None and reconnect_times:
         result["subscriber_reconnect_time_s"] = round(max(reconnect_times) - t_dead, 3)
@@ -289,6 +298,40 @@ async def collect_recovery_events(
             "incomplete recovery event timeline: missing " + ", ".join(missing)
         )
 
+    ordering_errors: list[str] = []
+    if (
+        t_dead is not None
+        and t_recovery_started is not None
+        and t_recovery_started < t_dead
+    ):
+        ordering_errors.append("broker_recovery_started before broker_declared_dead")
+    if (
+        t_recovery_started is not None
+        and t_recovered is not None
+        and t_recovered < t_recovery_started
+    ):
+        ordering_errors.append("broker_recovered before broker_recovery_started")
+    if (
+        t_recovery_started is not None
+        and any(ts < t_recovery_started for ts in reconnect_times)
+    ):
+        ordering_errors.append(
+            "subscriber_reconnected before broker_recovery_started"
+        )
+    if (
+        recovery_path_started is not None
+        and recovery_path_recovered is not None
+        and recovery_path_started != recovery_path_recovered
+    ):
+        ordering_errors.append(
+            "recovery path changed during trial "
+            f"({recovery_path_started} -> {recovery_path_recovered})"
+        )
+    if ordering_errors:
+        raise RuntimeError(
+            "invalid recovery event timeline: " + ", ".join(ordering_errors)
+        )
+
     return result
 
 
@@ -296,6 +339,7 @@ async def collect_snapshot_events(
     events: asyncio.Queue[dict[str, Any]],
     rounds: int = 3,
     timeout_per_round: float = 30.0,
+    expected_brokers: int | None = None,
 ) -> list[dict[str, Any]]:
     """Capture SNAPSHOT_COMPLETE events and measure coordination overhead.
 
@@ -303,30 +347,44 @@ async def collect_snapshot_events(
     """
     results: list[dict[str, Any]] = []
     round_events: list[dict[str, Any]] = []
-    last_event_time: float = asyncio.get_event_loop().time()
+    current_snapshot_id: str | None = None
 
     while len(results) < rounds:
         try:
             event = await asyncio.wait_for(events.get(), timeout=timeout_per_round)
         except asyncio.TimeoutError:
             if round_events:
-                results.append(_summarize_snapshot_round(round_events))
+                _append_snapshot_round(
+                    results,
+                    round_events,
+                    expected_brokers=expected_brokers,
+                )
                 round_events = []
             break
 
-        if event.get("type") == "snapshot_complete":
-            now = asyncio.get_event_loop().time()
-            round_events.append(event)
+        if event.get("type") != "snapshot_complete":
+            continue
 
-            # If >5s gap since last snapshot event, start a new round.
-            if now - last_event_time > 5.0 and len(round_events) > 1:
-                results.append(_summarize_snapshot_round(round_events[:-1]))
-                round_events = [round_events[-1]]
+        snapshot_id = str(event.get("data", {}).get("snapshot_id") or "")
+        if current_snapshot_id is None:
+            current_snapshot_id = snapshot_id
+        elif snapshot_id != current_snapshot_id:
+            _append_snapshot_round(
+                results,
+                round_events,
+                expected_brokers=expected_brokers,
+            )
+            round_events = []
+            current_snapshot_id = snapshot_id
 
-            last_event_time = now
+        round_events.append(event)
 
     if round_events and len(results) < rounds:
-        results.append(_summarize_snapshot_round(round_events))
+        _append_snapshot_round(
+            results,
+            round_events,
+            expected_brokers=expected_brokers,
+        )
 
     if len(results) < rounds:
         raise RuntimeError(
@@ -337,19 +395,112 @@ async def collect_snapshot_events(
     return results
 
 
+def classify_snapshot_round(
+    events: list[dict[str, Any]],
+    *,
+    expected_brokers: int | None,
+) -> str | None:
+    """Return an explicit invalidity reason when a snapshot round is not coherent."""
+    if not events:
+        return "snapshot round was empty"
+
+    snapshot_ids = {
+        str(event.get("data", {}).get("snapshot_id") or "") for event in events
+    }
+    if "" in snapshot_ids:
+        return "snapshot round missing snapshot_id"
+    if len(snapshot_ids) != 1:
+        return (
+            "snapshot round mixed snapshot ids: "
+            + ", ".join(sorted(snapshot_ids))
+        )
+
+    broker_ids = [event.get("data", {}).get("broker_id") for event in events]
+    if any(broker_id is None for broker_id in broker_ids):
+        return "snapshot round missing broker_id"
+
+    unique_broker_ids = {int(broker_id) for broker_id in broker_ids}
+    if len(unique_broker_ids) != len(broker_ids):
+        return "snapshot round contains duplicate broker completions"
+    if expected_brokers is not None and len(unique_broker_ids) != expected_brokers:
+        return (
+            f"snapshot round expected {expected_brokers} brokers, got "
+            f"{len(unique_broker_ids)}"
+        )
+
+    missing_timestamps = [
+        str(int(broker_id))
+        for broker_id, event in zip(broker_ids, events, strict=True)
+        if float(event.get("data", {}).get("snapshot_timestamp") or 0) <= 0
+    ]
+    if missing_timestamps:
+        return (
+            "snapshot round missing snapshot_timestamp for brokers "
+            + ", ".join(missing_timestamps)
+        )
+
+    return None
+
+
 def _summarize_snapshot_round(events: list[dict[str, Any]]) -> dict[str, Any]:
     # Use each broker's own snapshot_timestamp (when it actually completed the
     # snapshot) rather than the WebSocket event's timestamp (when the orchestrator
     # emitted the event). The orchestrator emits all events in the same for-loop
     # so event timestamps are indistinguishable; broker timestamps reflect real
     # per-broker completion times.
-    timestamps = [
-        e.get("data", {}).get("snapshot_timestamp") or e.get("timestamp", 0)
-        for e in events
-    ]
+    timestamps = [float(e.get("data", {}).get("snapshot_timestamp", 0)) for e in events]
     if not timestamps:
         return {"broker_count": 0, "coordination_ms": 0}
     return {
+        "snapshot_id": events[0].get("data", {}).get("snapshot_id"),
+        "broker_ids": sorted(
+            int(e.get("data", {}).get("broker_id")) for e in events
+        ),
         "broker_count": len(events),
         "coordination_ms": round((max(timestamps) - min(timestamps)) * 1000, 1),
     }
+
+
+def _append_snapshot_round(
+    results: list[dict[str, Any]],
+    round_events: list[dict[str, Any]],
+    *,
+    expected_brokers: int | None,
+) -> None:
+    reason = classify_snapshot_round(
+        round_events,
+        expected_brokers=expected_brokers,
+    )
+    if reason is None:
+        results.append(_summarize_snapshot_round(round_events))
+        return
+
+    if _can_skip_initial_partial_snapshot_round(
+        results,
+        round_events,
+        expected_brokers=expected_brokers,
+    ):
+        return
+
+    raise RuntimeError("invalid snapshot round: " + reason)
+
+
+def _can_skip_initial_partial_snapshot_round(
+    results: list[dict[str, Any]],
+    round_events: list[dict[str, Any]],
+    *,
+    expected_brokers: int | None,
+) -> bool:
+    """Allow the very first observed round to be partial if we attached mid-cycle."""
+    if results or expected_brokers is None:
+        return False
+
+    broker_ids = [event.get("data", {}).get("broker_id") for event in round_events]
+    if any(broker_id is None for broker_id in broker_ids):
+        return False
+
+    unique_broker_ids = {int(broker_id) for broker_id in broker_ids}
+    return (
+        0 < len(unique_broker_ids) < expected_brokers
+        and len(unique_broker_ids) == len(broker_ids)
+    )

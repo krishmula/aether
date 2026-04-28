@@ -261,7 +261,7 @@ def chart_recovery_timeline(cfg: BenchmarkConfig) -> None:
     _apply_theme(ax, fig)
 
     labels: list[str] = []
-    detection_bars: list[float] = []
+    failover_start_bars: list[float] = []
     recovery_bars: list[float] = []
     reconnect_bars: list[float] = []
 
@@ -270,15 +270,21 @@ def chart_recovery_timeline(cfg: BenchmarkConfig) -> None:
         trial_num = t.get("trial", "?")
         labels.append(f"Trial {trial_num}\n({path})")
 
-        detection = t.get("detection_time_s", 0)
+        failover_start = t.get(
+            "failover_start_latency_s",
+            t.get("detection_time_s", 0),
+        )
         total_recovery = t.get("recovery_time_s", 0)
         reconnect = t.get("subscriber_reconnect_time_s", 0)
 
-        # Stacked: detection | recovery (minus detection) | reconnect (beyond recovery)
-        recovery_only = max(0, total_recovery - detection)
+        # Stacked: failover start | recovery execution | reconnect tail.
+        recovery_only = t.get(
+            "recovery_execution_time_s",
+            max(0, total_recovery - failover_start),
+        )
         reconnect_only = max(0, reconnect - total_recovery)
 
-        detection_bars.append(detection)
+        failover_start_bars.append(failover_start)
         recovery_bars.append(recovery_only)
         reconnect_bars.append(reconnect_only)
 
@@ -286,23 +292,24 @@ def chart_recovery_timeline(cfg: BenchmarkConfig) -> None:
 
     ax.barh(
         y_pos,
-        detection_bars,
+        failover_start_bars,
         color=AMBER,
         edgecolor=GRID_COLOR,
-        label="Detection",
+        label="Failover Start",
         height=0.6,
     )
     ax.barh(
         y_pos,
         recovery_bars,
-        left=detection_bars,
+        left=failover_start_bars,
         color=CYAN,
         edgecolor=GRID_COLOR,
-        label="Recovery",
+        label="Recovery Execution",
         height=0.6,
     )
     lefts = [
-        d + r for d, r in zip(detection_bars, recovery_bars, strict=True)
+        d + r
+        for d, r in zip(failover_start_bars, recovery_bars, strict=True)
     ]
     ax.barh(
         y_pos,
