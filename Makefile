@@ -1,7 +1,7 @@
 # Makefile for aether distributed messaging system
 # Targets documented in docs/instructions.md and docs/roadmap.md
 
-.PHONY: demo status logs clean build build-dashboard test lint up down restart ps check-ports purge-network benchmark benchmark-charts
+.PHONY: demo status logs clean build build-benchmark build-dashboard test lint up down restart ps check-ports check-benchmark-ports purge-network benchmark benchmark-up benchmark-down benchmark-charts
 
 # Colors for better output
 GREEN = \033[0;32m
@@ -17,6 +17,7 @@ BOOTSTRAP_STATUS_PORT = 17100
 ORCHESTRATOR_PORT     = 9000
 DASHBOARD_PORT        = 3000
 ALL_PORTS = $(BOOTSTRAP_STATUS_PORT) $(ORCHESTRATOR_PORT) $(DASHBOARD_PORT)
+BENCHMARK_PORTS = $(BOOTSTRAP_STATUS_PORT) $(ORCHESTRATOR_PORT)
 
 # Default target
 all: help
@@ -36,7 +37,7 @@ help:
 	@echo "  $(YELLOW)make down$(NC)        - Stop compose services"
 	@echo "  $(YELLOW)make restart$(NC)     - Restart compose services"
 	@echo "  $(YELLOW)make ps$(NC)          - Show container status"
-	@echo "  $(YELLOW)make benchmark$(NC)    - Run full benchmark suite (requires: make demo)"
+	@echo "  $(YELLOW)make benchmark$(NC)    - Run strict benchmark verification flow"
 	@echo "  $(YELLOW)make benchmark-charts$(NC) - Regenerate charts from existing results"
 	@echo "  $(YELLOW)make check-ports$(NC) - Check if required ports are available"
 	@echo ""
@@ -88,6 +89,10 @@ build:
 	@echo "$(YELLOW)Building Docker images...$(NC)"
 	@docker-compose build
 
+build-benchmark:
+	@echo "$(YELLOW)Building benchmark service images...$(NC)"
+	@docker-compose build bootstrap orchestrator
+
 build-dashboard:
 	@echo "$(YELLOW)Building dashboard image...$(NC)"
 	@docker-compose build dashboard
@@ -137,8 +142,43 @@ check-ports:
 	fi
 	@echo "$(GREEN)All required ports are available.$(NC)"
 
+check-benchmark-ports:
+	@echo "$(YELLOW)Checking benchmark ports...$(NC)"
+	@failed=0; \
+	for port in $(BENCHMARK_PORTS); do \
+		if lsof -i :$$port >/dev/null 2>&1; then \
+			echo "  $(RED)✗$(NC) Port $$port is already in use"; \
+			failed=1; \
+		else \
+			echo "  $(GREEN)✓$(NC) Port $$port is available"; \
+		fi; \
+	done; \
+	if [ $$failed -eq 1 ]; then \
+		echo ""; \
+		echo "$(RED)Error: Benchmark ports are already in use.$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)Benchmark ports are available.$(NC)"
+
+benchmark-up: build-benchmark check-benchmark-ports purge-network
+	@echo "$(YELLOW)Starting benchmark-only services...$(NC)"
+	@docker-compose up -d bootstrap orchestrator
+	@echo "$(YELLOW)Waiting for orchestrator to be ready$(NC)"
+	@until curl -sf http://localhost:$(ORCHESTRATOR_PORT)/docs >/dev/null 2>&1; do \
+		printf '$(YELLOW).$(NC)'; sleep 2; \
+	done
+	@echo ""
+	@echo "$(GREEN)Benchmark environment ready.$(NC)"
+
+benchmark-down:
+	@$(MAKE) clean
+
 benchmark:
-	@echo "$(YELLOW)Running benchmark suite (requires: make demo)...$(NC)"
+	@set -e; \
+	trap 'rc=$$?; $(MAKE) benchmark-down; exit $$rc' EXIT; \
+	$(MAKE) benchmark-down; \
+	$(MAKE) benchmark-up; \
+	echo "$(YELLOW)Running strict benchmark verification suite...$(NC)"; \
 	python3 -m benchmarks.runner
 
 benchmark-charts:
