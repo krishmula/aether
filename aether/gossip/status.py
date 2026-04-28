@@ -63,6 +63,8 @@ class _StatusHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/status":
             self._handle_status()
+        elif self.path == "/peer-snapshots":
+            self._handle_list_peer_snapshots()
         elif self.path.startswith("/snapshots/"):
             self._handle_get_snapshot()
         else:
@@ -138,6 +140,19 @@ class _StatusHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json({"status": "recovered"}, status=200)
+
+    # ------------------------------------------------------------------ #
+    # /peer-snapshots implementation                                        #
+    # ------------------------------------------------------------------ #
+
+    def _handle_list_peer_snapshots(self) -> None:
+        with self.broker._lock:
+            snapshots = dict(self.broker._peer_snapshots)
+
+        self._send_json(
+            {str(addr): _serialize_snapshot(snap) for addr, snap in snapshots.items()},
+            status=200,
+        )
 
     # ------------------------------------------------------------------ #
     # /snapshots/{host}/{port} implementation                              #

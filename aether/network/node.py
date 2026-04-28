@@ -3,6 +3,7 @@ import pickle
 import socket
 import threading
 import time
+from collections import deque
 from typing import Any, Dict, Optional, Tuple
 
 from aether.utils.log import BoundLogger
@@ -69,7 +70,7 @@ class NetworkNode:
         self._connections: Dict[NodeAddress, socket.socket] = {}
         self._connections_lock = threading.Lock()
 
-        self._message_queue: list = []
+        self._message_queue: deque = deque()
         self._queue_lock = threading.Lock()
         self._queue_condition = threading.Condition(self._queue_lock)
 
@@ -254,11 +255,11 @@ class NetworkNode:
                 return None
             try:
                 chunk = sock.recv(num_bytes - len(data))
-                if not chunk:   # EOF — peer closed the connection
+                if not chunk:  # EOF — peer closed the connection
                     return None
                 data += chunk
             except socket.timeout:
-                continue        # peer was quiet; keep waiting
+                continue  # peer was quiet; keep waiting
             except Exception:
                 return None
         return data
@@ -400,7 +401,7 @@ class NetworkNode:
                 self._queue_condition.wait(timeout)
 
             if self._message_queue:
-                msg, sender = self._message_queue.pop(0)
+                msg, sender = self._message_queue.popleft()
                 return msg, sender
             else:
                 return None, None

@@ -13,12 +13,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime
 
 import httpx
 
-from .models import ComponentInfo, ComponentStatus, ComponentType
 from aether.utils.log import BoundLogger
+
+from .models import ComponentInfo, ComponentStatus, ComponentType
 
 logger = BoundLogger(
     logging.getLogger(__name__),
@@ -36,12 +37,14 @@ class HealthMonitor:
         poll_interval: float = 5.0,
         failure_threshold: int = 3,
         startup_grace_seconds: float = 30.0,
+        request_timeout: float = 5.0,
     ) -> None:
         self._components = components
         self._on_broker_dead = on_broker_dead
         self.poll_interval = poll_interval
         self.failure_threshold = failure_threshold
         self.startup_grace_seconds = startup_grace_seconds
+        self.request_timeout = request_timeout
         self._failure_counts: dict[int, int] = {}  # broker_id → consecutive failures
 
     async def run(self) -> None:
@@ -75,7 +78,7 @@ class HealthMonitor:
     async def _poll_one(self, client: httpx.AsyncClient, broker: ComponentInfo) -> None:
         url = f"http://{broker.hostname}:{broker.internal_status_port}/status"
         try:
-            resp = await client.get(url, timeout=2.0)
+            resp = await client.get(url, timeout=self.request_timeout)
             success = resp.status_code == 200
         except Exception:
             success = False

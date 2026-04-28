@@ -52,6 +52,9 @@ class GossipBroker:
         self.address = address
         self.network = NetworkNode(address)
         self.log = BoundLogger(logger, {"broker": str(address)})
+        self.snapshot_log = BoundLogger(
+            logging.getLogger(f"{logger.name}.snapshot"), {"broker": str(address)}
+        )
 
         self._local_broker = Broker()
 
@@ -293,7 +296,7 @@ class GossipBroker:
             timestamp=time.time(),
         )
 
-        self.log.debug(
+        self.snapshot_log.debug(
             "local state recorded snapshot_id=%s subscribers=%d peers=%d",
             snapshot_id[:8],
             len(snapshot.remote_subscribers),
@@ -349,7 +352,7 @@ class GossipBroker:
             timestamp=time.time(),
         )
 
-        self.log.info(
+        self.snapshot_log.info(
             "initiating snapshot snapshot_id=%s peers=%d",
             snapshot_id[:8],
             len(peers_to_notify),
@@ -359,9 +362,9 @@ class GossipBroker:
         for peer in peers_to_notify:
             try:
                 self.network.send(marker, peer)
-                self.log.debug("snapshot marker sent to %s", peer)
+                self.snapshot_log.debug("snapshot marker sent to %s", peer)
             except Exception:
-                self.log.error(
+                self.snapshot_log.error(
                     "failed to send snapshot marker to %s", peer, exc_info=True
                 )
 
@@ -386,7 +389,7 @@ class GossipBroker:
 
             if first_marker:
                 if self._snapshot_in_progress is not None:
-                    self.log.warning(
+                    self.snapshot_log.warning(
                         "received marker for snapshot_id=%s "
                         "while %s in progress, ignoring",
                         marker.snapshot_id[:8],
@@ -410,7 +413,7 @@ class GossipBroker:
                 self._channels_closed.add(sender)
                 peers_to_notify = set()
 
-            self.log.debug(
+            self.snapshot_log.debug(
                 "snapshot marker received from %s snapshot_id=%s first=%s closed=%d/%d",
                 sender,
                 marker.snapshot_id[:8],
@@ -429,9 +432,9 @@ class GossipBroker:
             for peer in peers_to_notify:
                 try:
                     self.network.send(forward_marker, peer)
-                    self.log.debug("forwarded snapshot marker to %s", peer)
+                    self.snapshot_log.debug("forwarded snapshot marker to %s", peer)
                 except Exception:
-                    self.log.error(
+                    self.snapshot_log.error(
                         "failed to forward snapshot marker to %s", peer, exc_info=True
                     )
 
@@ -452,7 +455,7 @@ class GossipBroker:
             if snapshot is None:
                 return
 
-            self.log.info(
+            self.snapshot_log.info(
                 "snapshot complete snapshot_id=%s subscribers=%d peers=%d",
                 snapshot.snapshot_id[:8],
                 len(snapshot.remote_subscribers),
@@ -477,7 +480,7 @@ class GossipBroker:
             available_peers = list(self.peer_brokers)
 
         if not available_peers:
-            self.log.warning(
+            self.snapshot_log.warning(
                 "no peers available to replicate snapshot_id=%s",
                 snapshot.snapshot_id[:8],
             )
@@ -488,7 +491,7 @@ class GossipBroker:
 
         replica = SnapshotReplica(snapshot)
 
-        self.log.info(
+        self.snapshot_log.info(
             "replicating snapshot_id=%s to %d peer(s)",
             snapshot.snapshot_id[:8],
             num_targets,
@@ -497,9 +500,9 @@ class GossipBroker:
         for peer in targets:
             try:
                 self.network.send(replica, peer)
-                self.log.debug("snapshot replica sent to %s", peer)
+                self.snapshot_log.debug("snapshot replica sent to %s", peer)
             except Exception:
-                self.log.error(
+                self.snapshot_log.error(
                     "failed to send snapshot replica to %s", peer, exc_info=True
                 )
 
@@ -518,7 +521,7 @@ class GossipBroker:
             existing = self._peer_snapshots.get(source_broker)
 
             if existing is not None and existing.timestamp >= snapshot.timestamp:
-                self.log.debug(
+                self.snapshot_log.debug(
                     "ignoring stale snapshot replica from %s "
                     "(have ts=%f, received ts=%f)",
                     source_broker,
@@ -529,7 +532,7 @@ class GossipBroker:
 
             self._peer_snapshots[source_broker] = snapshot
 
-        self.log.info(
+        self.snapshot_log.info(
             "stored snapshot replica for %s snapshot_id=%s subscribers=%d peers=%d",
             source_broker,
             snapshot.snapshot_id[:8],
@@ -552,7 +555,7 @@ class GossipBroker:
             expected = len(self._channels_recording)
             closed = len(self._channels_closed)
 
-            self.log.warning(
+            self.snapshot_log.warning(
                 "snapshot timed out snapshot_id=%s elapsed=%.2fs closed=%d/%d; clearing",
                 snapshot_id[:8],
                 elapsed,
@@ -597,10 +600,10 @@ class GossipBroker:
                     should_initiate = sorted_addresses[0] == self.address
 
             if should_initiate:
-                self.log.debug("snapshot timer fired, initiating as leader")
+                self.snapshot_log.debug("snapshot timer fired, initiating as leader")
                 self.initiate_snapshot()
             else:
-                self.log.debug("snapshot timer fired, not leader — awaiting marker")
+                self.snapshot_log.debug("snapshot timer fired, not leader — awaiting marker")
 
     def _handle_snapshot_request(
         self, request: SnapshotRequest, sender: NodeAddress
@@ -616,11 +619,11 @@ class GossipBroker:
             stored_snapshot = self._peer_snapshots.get(requested_broker)
 
         if stored_snapshot:
-            self.log.info(
+            self.snapshot_log.info(
                 "sending stored snapshot for %s to %s", requested_broker, sender
             )
         else:
-            self.log.debug("no snapshot available for %s", requested_broker)
+            self.snapshot_log.debug("no snapshot available for %s", requested_broker)
 
         response = SnapshotResponse(
             broker_address=requested_broker, snapshot=stored_snapshot
@@ -629,7 +632,7 @@ class GossipBroker:
         try:
             self.network.send(response, sender)
         except Exception:
-            self.log.error(
+            self.snapshot_log.error(
                 "failed to send snapshot response to %s", sender, exc_info=True
             )
 
@@ -645,14 +648,14 @@ class GossipBroker:
             self._recovery_responses_received += 1
 
             if self._recovery_snapshot is not None:
-                self.log.debug(
+                self.snapshot_log.debug(
                     "already have recovery snapshot, ignoring response from %s", sender
                 )
                 return
 
             if response.snapshot is not None:
                 self._recovery_snapshot = response.snapshot
-                self.log.info(
+                self.snapshot_log.info(
                     "received recovery snapshot from %s for %s subscribers=%d peers=%d",
                     sender,
                     response.broker_address,
@@ -660,7 +663,7 @@ class GossipBroker:
                     len(response.snapshot.peer_brokers),
                 )
             else:
-                self.log.debug(
+                self.snapshot_log.debug(
                     "peer %s has no snapshot for %s", sender, response.broker_address
                 )
 
@@ -680,12 +683,12 @@ class GossipBroker:
             self._recovery_peers_asked = len(peers)
 
         if not peers:
-            self.log.warning(
+            self.snapshot_log.warning(
                 "no peers available to request snapshot for %s", dead_broker
             )
             return None
 
-        self.log.info(
+        self.snapshot_log.info(
             "requesting snapshot for %s from %d peer(s)", dead_broker, len(peers)
         )
 
@@ -693,9 +696,9 @@ class GossipBroker:
         for peer in peers:
             try:
                 self.network.send(request, peer)
-                self.log.debug("snapshot request sent to %s", peer)
+                self.snapshot_log.debug("snapshot request sent to %s", peer)
             except Exception:
-                self.log.error(
+                self.snapshot_log.error(
                     "failed to send snapshot request to %s", peer, exc_info=True
                 )
 
@@ -708,7 +711,7 @@ class GossipBroker:
                     return snapshot
 
                 if self._recovery_responses_received >= self._recovery_peers_asked:
-                    self.log.warning(
+                    self.snapshot_log.warning(
                         "all peers responded but none had snapshot for %s", dead_broker
                     )
                     self._pending_recovery_request = None
@@ -716,7 +719,7 @@ class GossipBroker:
 
             time.sleep(0.1)
 
-        self.log.warning("timeout waiting for snapshot responses for %s", dead_broker)
+        self.snapshot_log.warning("timeout waiting for snapshot responses for %s", dead_broker)
         with self._lock:
             self._pending_recovery_request = None
         return None

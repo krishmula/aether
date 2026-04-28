@@ -54,6 +54,18 @@ CLAUDE.md
 config.yaml
 config-local.yaml
 
+# Git worktrees (full repo checkouts nested inside the repo)
+.worktrees/
+
 # Generated benchmark outputs
 benchmarks/results/*
 !benchmarks/results/.gitkeep
+
+# Development scratch files
+test_heartbeat.py
+diagnose_snapshot.py
+demo-logs.sh
+
+# Development artifacts
+docs/benchmark-audit-*.md
+docs/superpowers/

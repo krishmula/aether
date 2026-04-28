@@ -14,6 +14,7 @@ import docker.errors
 from .models import (
     BootstrapInfo,
     BrokerMetrics,
+    BrokerSnapshotInfo,
     ComponentInfo,
     ComponentStatus,
     ComponentType,
@@ -22,6 +23,7 @@ from .models import (
     CreateSubscriberRequest,
     LatencyPercentiles,
     MetricsResponse,
+    SnapshotsResponse,
     SnapshotStatusResponse,
     SubscriberMetrics,
     SystemState,
@@ -117,9 +119,7 @@ class DockerManager:
     def remove_broker(self, broker_id: int) -> ComponentInfo:
         """Stop and remove a broker container."""
         remove_container_info = self._get_component(ComponentType.BROKER, broker_id)
-        container = self.client.containers.get(remove_container_info.container_id)
-        container.stop(timeout=10)
-        container.remove()
+        self._stop_and_remove_container(remove_container_info)
         remove_container_info.status = ComponentStatus.STOPPED
         del self._components[remove_container_info.container_name]
         self._advance_topology_generation()
@@ -208,9 +208,7 @@ class DockerManager:
     def remove_publisher(self, publisher_id: int) -> ComponentInfo:
         """Stop and remove a publisher container."""
         info = self._get_component(ComponentType.PUBLISHER, publisher_id)
-        container = self.client.containers.get(info.container_id)
-        container.stop(timeout=10)
-        container.remove()
+        self._stop_and_remove_container(info)
         info.status = ComponentStatus.STOPPED
         del self._components[info.container_name]
         self._advance_topology_generation()
@@ -282,9 +280,7 @@ class DockerManager:
     def remove_subscriber(self, subscriber_id: int) -> ComponentInfo:
         """Stop and remove a subscriber container."""
         info = self._get_component(ComponentType.SUBSCRIBER, subscriber_id)
-        container = self.client.containers.get(info.container_id)
-        container.stop(timeout=10)
-        container.remove()
+        self._stop_and_remove_container(info)
         info.status = ComponentStatus.STOPPED
         del self._components[info.container_name]
         self._advance_topology_generation()
@@ -294,6 +290,12 @@ class DockerManager:
             info.container_id[:12],
         )
         return info
+
+    def _stop_and_remove_container(self, info: ComponentInfo) -> None:
+        """Remove a managed container using the configured stop grace period."""
+        container = self.client.containers.get(info.container_id)
+        container.stop(timeout=settings.component_stop_timeout)
+        container.remove()
 
     # --- System State ---
 
@@ -482,7 +484,7 @@ class DockerManager:
     def trigger_snapshot(
         self, initiator_broker_id: int | None
     ) -> SnapshotStatusResponse:
-        """Trigger Chandy-Lamport snapshot on the specified (or first running) broker."""
+        """Trigger a snapshot on the specified or first running broker."""
         raise NotImplementedError
 
     # --- Internal Helpers ---
@@ -511,7 +513,7 @@ class DockerManager:
     def _get_component(
         self, component_type: ComponentType, component_id: int
     ) -> ComponentInfo:
-        """Look up a managed component by type and ID, raising ValueError if not found."""
+        """Look up a managed component by type and ID."""
         for info in self._components.values():
             if (
                 info.component_type == component_type
@@ -543,10 +545,12 @@ class DockerManager:
         ]
 
     def _fetch_status(self, hostname: str, internal_status_port: int) -> dict:
-        """GET /status from a component via its internal Docker hostname. Returns {} on failure."""
+        """GET /status from a component via its Docker hostname."""
         url = f"http://{hostname}:{internal_status_port}/status"
         try:
-            with urllib.request.urlopen(url, timeout=2) as resp:
+            with urllib.request.urlopen(
+                url, timeout=settings.status_fetch_timeout
+            ) as resp:
                 return json.loads(resp.read())
         except (URLError, TimeoutError) as exc:
             logger.warning("Failed to fetch status from %s: %s", url, exc)
@@ -555,18 +559,18 @@ class DockerManager:
     def _fetch_url(self, url: str) -> dict:
         """GET an arbitrary URL. Returns {} on failure."""
         try:
-            with urllib.request.urlopen(url, timeout=2) as resp:
+            with urllib.request.urlopen(
+                url, timeout=settings.status_fetch_timeout
+            ) as resp:
                 return json.loads(resp.read())
         except Exception:
             return {}
 
-    def get_snapshots(self) -> "SnapshotsResponse":
+    def get_snapshots(self) -> SnapshotsResponse:
         """Return per-broker snapshot metadata by querying peer status servers."""
-        import time
-        from .models import BrokerSnapshotInfo, SnapshotsResponse
-
         brokers = [
-            info for info in self._components.values()
+            info
+            for info in self._components.values()
             if info.component_type == ComponentType.BROKER
             and info.status == ComponentStatus.RUNNING
         ]
@@ -583,8 +587,10 @@ class DockerManager:
                     f"/snapshots/{target.hostname}/{target.internal_port}"
                 )
                 raw = self._fetch_url(url)
-                if raw and raw.get("timestamp") and (
-                    best is None or raw["timestamp"] > best["timestamp"]
+                if (
+                    raw
+                    and raw.get("timestamp")
+                    and (best is None or raw["timestamp"] > best["timestamp"])
                 ):
                     best = raw
 
@@ -592,22 +598,26 @@ class DockerManager:
             snap_state = own.get("snapshot_state", "idle")
 
             if best:
-                results.append(BrokerSnapshotInfo(
-                    broker_id=target.component_id,
-                    broker_address=f"{target.hostname}:{target.internal_port}",
-                    snapshot_id=best.get("snapshot_id"),
-                    timestamp=best["timestamp"],
-                    age_seconds=fetched_at - best["timestamp"],
-                    peer_count=len(best.get("peer_brokers", [])),
-                    subscriber_count=len(best.get("remote_subscribers", {})),
-                    seen_message_count=len(best.get("seen_message_ids", [])),
-                    snapshot_state=snap_state,
-                ))
+                results.append(
+                    BrokerSnapshotInfo(
+                        broker_id=target.component_id,
+                        broker_address=f"{target.hostname}:{target.internal_port}",
+                        snapshot_id=best.get("snapshot_id"),
+                        timestamp=best["timestamp"],
+                        age_seconds=fetched_at - best["timestamp"],
+                        peer_count=len(best.get("peer_brokers", [])),
+                        subscriber_count=len(best.get("remote_subscribers", {})),
+                        seen_message_count=len(best.get("seen_message_ids", [])),
+                        snapshot_state=snap_state,
+                    )
+                )
             else:
-                results.append(BrokerSnapshotInfo(
-                    broker_id=target.component_id,
-                    broker_address=f"{target.hostname}:{target.internal_port}",
-                    snapshot_state=snap_state,
-                ))
+                results.append(
+                    BrokerSnapshotInfo(
+                        broker_id=target.component_id,
+                        broker_address=f"{target.hostname}:{target.internal_port}",
+                        snapshot_state=snap_state,
+                    )
+                )
 
         return SnapshotsResponse(brokers=results, fetched_at=fetched_at)

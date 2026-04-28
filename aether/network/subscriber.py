@@ -243,7 +243,7 @@ class NetworkSubscriber:
                         self._latency_samples_ns.append(
                             time.monotonic_ns() - msg.send_timestamp_ns
                         )
-                self.log.info(
+                self.log.debug(
                     "received payload=%d from broker %s", msg.msg.payload, sender
                 )
             elif isinstance(msg, Pong):
@@ -292,7 +292,7 @@ class NetworkSubscriber:
         attempt = 0
 
         while self.running and not self._broker_alive:
-            delay = random.uniform(0, min(cap, base * (2 ** attempt)))
+            delay = random.uniform(0, min(cap, base * (2**attempt)))
             if delay > 0:
                 time.sleep(delay)
 
@@ -333,9 +333,7 @@ class NetworkSubscriber:
                 )
 
             except Exception:
-                self.log.debug(
-                    "reconnect attempt %d failed (will retry)", attempt + 1
-                )
+                self.log.debug("reconnect attempt %d failed (will retry)", attempt + 1)
                 attempt += 1
 
     @property

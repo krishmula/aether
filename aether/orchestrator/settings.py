@@ -13,7 +13,7 @@ class OrchestratorSettings(BaseSettings):
     orchestrator_url: str = "http://orchestrator:8001"
 
     # Logging
-    log_level: str = "INFO"
+    log_level: str = "DEBUG"
     # Base URL of the OTel Collector OTLP/HTTP endpoint. When set, the
     # orchestrator ships its own structured logs to the collector in addition
     # to stdout. Set via OTEL_ENDPOINT env var in docker-compose.yml.
@@ -24,9 +24,18 @@ class OrchestratorSettings(BaseSettings):
     # Recovery settings
     snapshot_max_age: float = 45.0
     health_poll_interval: float = 0.5
+    # HealthMonitor (background broker /status polling). Under load, brokers
+    # may respond slowly; keep thresholds conservative to avoid false failover.
+    health_broker_poll_interval: float = 2.0
+    health_broker_failure_threshold: int = 8
+    health_broker_request_timeout: float = 5.0
+    health_broker_startup_grace_seconds: float = 45.0
     health_timeout: float = 15.0
+    status_fetch_timeout: float = 5.0
+    snapshot_monitor_poll_interval: float = 2.0
     recovery_timeout: float = 30.0
     recovery_debounce_window: float = 60.0
+    component_stop_timeout: int = 1
 
 
 settings = OrchestratorSettings()
