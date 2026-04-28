@@ -89,10 +89,11 @@ class GossipBroker:
         self._snapshot_in_progress: Optional[str] = None
         self._snapshot_recorded_state: Optional[BrokerSnapshot] = None
         self._snapshot_started_at: Optional[float] = None
-        self._snapshot_timeout: float = 30.0
+        self._snapshot_timeout: float = 60.0
         self._channels_recording: Dict[NodeAddress, List[GossipMessage]] = {}
         self._channels_closed: Set[NodeAddress] = set()
         self._peer_snapshots: Dict[NodeAddress, BrokerSnapshot] = {}
+        self._latest_local_snapshot: Optional[BrokerSnapshot] = None
 
         self._pending_recovery_request: Optional[NodeAddress] = None
         self._recovery_snapshot: Optional[BrokerSnapshot] = None
@@ -455,6 +456,8 @@ class GossipBroker:
             if snapshot is None:
                 return
 
+            self._latest_local_snapshot = snapshot
+
             self.snapshot_log.info(
                 "snapshot complete snapshot_id=%s subscribers=%d peers=%d",
                 snapshot.snapshot_id[:8],
@@ -603,7 +606,9 @@ class GossipBroker:
                 self.snapshot_log.debug("snapshot timer fired, initiating as leader")
                 self.initiate_snapshot()
             else:
-                self.snapshot_log.debug("snapshot timer fired, not leader — awaiting marker")
+                self.snapshot_log.debug(
+                    "snapshot timer fired, not leader — awaiting marker"
+                )
 
     def _handle_snapshot_request(
         self, request: SnapshotRequest, sender: NodeAddress
@@ -719,7 +724,9 @@ class GossipBroker:
 
             time.sleep(0.1)
 
-        self.snapshot_log.warning("timeout waiting for snapshot responses for %s", dead_broker)
+        self.snapshot_log.warning(
+            "timeout waiting for snapshot responses for %s", dead_broker
+        )
         with self._lock:
             self._pending_recovery_request = None
         return None

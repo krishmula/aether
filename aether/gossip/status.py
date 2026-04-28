@@ -91,6 +91,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
             snapshot_state = (
                 "recording" if broker._snapshot_in_progress is not None else "idle"
             )
+            latest = broker._latest_local_snapshot
 
         uptime = round(now - broker._start_time, 1)
 
@@ -106,6 +107,9 @@ class _StatusHandler(BaseHTTPRequestHandler):
             "seen_message_ids": seen_count,
             "uptime_seconds": uptime,
             "snapshot_state": snapshot_state,
+            "latest_snapshot": (
+                _serialize_snapshot(latest) if latest is not None else None
+            ),
         }
 
         self._send_json(payload, status=200)

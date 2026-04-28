@@ -349,52 +349,68 @@ async def start_health_monitoring() -> None:
 
 
 async def _snapshot_monitor() -> None:
-    """Poll broker snapshot states; emit snapshot_complete when a new snapshot is detected.
+    """Poll broker snapshot states via direct /status queries.
 
-    Compares snapshot timestamps per broker across polls. When a broker's stored
-    snapshot timestamp advances, a new snapshot cycle completed — emit the WS event
-    so the dashboard can animate and refresh.
-
-    last_timestamps is seeded at startup so that pre-existing broker snapshots
-    (present when the orchestrator restarts) are not replayed as new events.
-    Snapshots taken by freshly created brokers (not in the initial state) always
-    emit on their first detection because their broker_address is absent from
-    last_timestamps until that moment.
+    Queries each broker's /status endpoint directly for its latest local
+    snapshot. Emits SNAPSHOT_COMPLETE when a broker's snapshot timestamp
+    advances. Seeds last_timestamps at startup so pre-existing snapshots
+    are not replayed as new events.
     """
-    last_timestamps: dict[str, float] = {}  # broker_address -> last seen timestamp
+    last_timestamps: dict[str, float] = {}
     loop = asyncio.get_event_loop()
 
+    def _running_brokers():
+        return [
+            info
+            for info in docker_mgr._components.values()
+            if info.component_type == ComponentType.BROKER
+            and info.status == ComponentStatus.RUNNING
+        ]
+
     # Seed baseline so pre-existing snapshots are not treated as new on startup.
-    try:
-        initial = await loop.run_in_executor(None, docker_mgr.get_snapshots)
-        for s in initial.brokers:
-            if s.timestamp is not None:
-                last_timestamps[s.broker_address] = s.timestamp
-    except Exception:
-        pass
+    for info in _running_brokers():
+        try:
+            raw = await loop.run_in_executor(
+                None,
+                docker_mgr._fetch_status,
+                info.hostname,
+                info.internal_status_port,
+            )
+            snap = raw.get("latest_snapshot")
+            if snap and snap.get("timestamp"):
+                last_timestamps[info.hostname] = snap["timestamp"]
+        except Exception:
+            pass
 
     while True:
         await asyncio.sleep(settings.snapshot_monitor_poll_interval)
-        try:
-            data = await loop.run_in_executor(None, docker_mgr.get_snapshots)
-            for s in data.brokers:
-                if s.timestamp is None:
+        for info in _running_brokers():
+            try:
+                raw = await loop.run_in_executor(
+                    None,
+                    docker_mgr._fetch_status,
+                    info.hostname,
+                    info.internal_status_port,
+                )
+                snap = raw.get("latest_snapshot")
+                if not snap or not snap.get("timestamp"):
                     continue
-                prev = last_timestamps.get(s.broker_address)
-                if prev is None or s.timestamp > prev:
-                    last_timestamps[s.broker_address] = s.timestamp
+
+                ts = snap["timestamp"]
+                prev = last_timestamps.get(info.hostname)
+                if prev is None or ts > prev:
+                    last_timestamps[info.hostname] = ts
                     await broadcaster.emit(
                         EventType.SNAPSHOT_COMPLETE,
                         {
-                            "broker_id": s.broker_id,
-                            "broker_address": s.broker_address,
-                            "snapshot_id": s.snapshot_id,
-                            "subscriber_count": s.subscriber_count,
-                            "snapshot_timestamp": s.timestamp,
+                            "broker_id": info.component_id,
+                            "broker_address": f"{info.hostname}:{info.internal_port}",
+                            "snapshot_id": snap["snapshot_id"],
+                            "snapshot_timestamp": ts,
                         },
                     )
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 
 async def _metrics_updater() -> None:
