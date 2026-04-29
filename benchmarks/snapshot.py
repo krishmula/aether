@@ -8,8 +8,8 @@ import logging
 import time
 from typing import Any
 
-from benchmarks.client import AetherClient, event_stream
-from benchmarks.collectors import collect_snapshot_events
+from benchmarks.client import AetherClient
+from benchmarks.collectors import collect_snapshot_rounds
 from benchmarks.config import BenchmarkConfig
 
 logger = logging.getLogger(__name__)
@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
     """Run the snapshot coordination benchmark.
 
-    For each broker count, seed a topology, observe SNAPSHOT_COMPLETE events,
-    and measure the coordination overhead (time between first and last broker).
+    For each broker count, seed a topology, poll broker /status endpoints
+    directly to observe snapshot rounds, and measure coordination overhead
+    (spread between first and last broker completing each round).
     """
     client = AetherClient(cfg)
     results: list[dict[str, Any]] = []
@@ -46,22 +47,20 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 )
                 continue
 
-            # Wait for system to stabilize and snapshots to start firing.
             logger.info("  warmup (%ds)...", cfg.warmup_seconds)
             await asyncio.sleep(cfg.warmup_seconds)
 
-            # Collect snapshot events via WebSocket.
             logger.info(
                 "  observing %d snapshot rounds...", cfg.snapshot_rounds
             )
             try:
-                async with event_stream(cfg) as events:
-                    rounds = await collect_snapshot_events(
-                        events,
-                        rounds=cfg.snapshot_rounds,
-                        timeout_per_round=cfg.snapshot_timeout_per_round,
-                        expected_brokers=n_brokers,
-                    )
+                rounds = await collect_snapshot_rounds(
+                    client,
+                    rounds=cfg.snapshot_rounds,
+                    expected_brokers=n_brokers,
+                    poll_interval=cfg.snapshot_poll_interval,
+                    convergence_timeout=cfg.snapshot_convergence_timeout,
+                )
             except RuntimeError as exc:
                 logger.warning(
                     "  invalid snapshot capture for %d brokers: %s",
@@ -80,13 +79,7 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 continue
 
             coordination_times = [r["coordination_ms"] for r in rounds]
-            if coordination_times:
-                mean_ms = sum(coordination_times) / len(coordination_times)
-                min_ms = min(coordination_times)
-                max_ms = max(coordination_times)
-            else:
-                mean_ms = min_ms = max_ms = 0
-
+            mean_ms = sum(coordination_times) / len(coordination_times)
             entry = {
                 "brokers": n_brokers,
                 "subscribers": n_subscribers,
@@ -94,8 +87,8 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
                 "rounds": rounds,
                 "summary": {
                     "mean_ms": round(mean_ms, 1),
-                    "min_ms": round(min_ms, 1),
-                    "max_ms": round(max_ms, 1),
+                    "min_ms": round(min(coordination_times), 1),
+                    "max_ms": round(max(coordination_times), 1),
                     "rounds_captured": len(rounds),
                 },
             }
@@ -103,8 +96,8 @@ async def run(cfg: BenchmarkConfig) -> dict[str, Any]:
             logger.info(
                 "  result: mean=%.1fms, min=%.1fms, max=%.1fms (%d rounds)",
                 mean_ms,
-                min_ms,
-                max_ms,
+                min(coordination_times),
+                max(coordination_times),
                 len(rounds),
             )
 

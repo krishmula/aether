@@ -108,7 +108,13 @@ class _StatusHandler(BaseHTTPRequestHandler):
             "uptime_seconds": uptime,
             "snapshot_state": snapshot_state,
             "latest_snapshot": (
-                _serialize_snapshot(latest) if latest is not None else None
+                {
+                    "snapshot_id": latest.snapshot_id,
+                    "timestamp": latest.timestamp,
+                    "peer_count": len(latest.peer_brokers),
+                }
+                if latest is not None
+                else None
             ),
         }
 

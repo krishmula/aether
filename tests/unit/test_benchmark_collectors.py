@@ -6,12 +6,13 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
+from unittest.mock import patch
+
 from benchmarks.collectors import (
     classify_latency_window,
-    classify_snapshot_round,
     classify_throughput_window,
     collect_recovery_events,
-    collect_snapshot_events,
+    collect_snapshot_rounds,
     collect_throughput,
 )
 from benchmarks.config import BenchmarkConfig
@@ -167,89 +168,103 @@ class TestEventCollectors(unittest.IsolatedAsyncioTestCase):
         ):
             await collect_recovery_events(events, timeout=0.05)
 
-    async def test_collect_snapshot_events_rejects_missing_rounds(self) -> None:
-        events: asyncio.Queue[dict] = asyncio.Queue()
-        events.put_nowait(
-            {
-                "type": "snapshot_complete",
-                "timestamp": 10.0,
-                "data": {"snapshot_timestamp": 10.0},
-            }
-        )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "invalid snapshot round: snapshot round missing snapshot_id",
-        ):
-            await collect_snapshot_events(events, rounds=2, timeout_per_round=0.01)
-
-    async def test_collect_snapshot_events_skips_initial_partial_round(self) -> None:
-        events: asyncio.Queue[dict] = asyncio.Queue()
-        events.put_nowait(
-            {
-                "type": "snapshot_complete",
-                "timestamp": 10.0,
-                "data": {
-                    "broker_id": 2,
-                    "snapshot_id": "stale-round",
-                    "snapshot_timestamp": 10.0,
-                },
-            }
-        )
-        for broker_id, ts in ((1, 20.0), (2, 20.1), (3, 20.2)):
-            events.put_nowait(
-                {
-                    "type": "snapshot_complete",
-                    "timestamp": ts,
-                    "data": {
-                        "broker_id": broker_id,
-                        "snapshot_id": "round-1",
-                        "snapshot_timestamp": ts,
-                    },
-                }
-            )
-
-        rounds = await collect_snapshot_events(
-            events,
-            rounds=1,
-            timeout_per_round=0.01,
-            expected_brokers=3,
-        )
+    async def test_collect_snapshot_rounds_records_coordination_ms(self) -> None:
+        """Happy path: pre-flight absorbs solo snapshots, round 1 measures coordinated one."""
+        client = AsyncMock()
+        t0 = 1000.0
+        client.get_broker_snapshot_status.side_effect = [
+            # pre-flight poll 1: brokers still starting — no snapshots yet
+            [
+                {"broker_id": i, "timestamp": None, "snapshot_id": None, "snapshot_state": "idle"}
+                for i in (1, 2, 3)
+            ],
+            # pre-flight poll 2: solo snapshots fired — pre-flight passes, baseline set here
+            [
+                {"broker_id": 1, "timestamp": t0, "snapshot_id": "solo-1", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": t0, "snapshot_id": "solo-2", "snapshot_state": "idle"},
+                {"broker_id": 3, "timestamp": t0, "snapshot_id": "solo-3", "snapshot_state": "idle"},
+            ],
+            # round 1 poll: coordinated snapshot, all share one ID, measured spread
+            [
+                {"broker_id": 1, "timestamp": t0 + 90.010, "snapshot_id": "snap-coord", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": t0 + 90.020, "snapshot_id": "snap-coord", "snapshot_state": "idle"},
+                {"broker_id": 3, "timestamp": t0 + 90.005, "snapshot_id": "snap-coord", "snapshot_state": "idle"},
+            ],
+        ]
+        with patch("benchmarks.collectors.asyncio.sleep", new=AsyncMock()):
+            rounds = await collect_snapshot_rounds(client, rounds=1, expected_brokers=3)
 
         self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["snapshot_id"], "snap-coord")
         self.assertEqual(rounds[0]["broker_count"], 3)
-        self.assertEqual(rounds[0]["snapshot_id"], "round-1")
+        self.assertAlmostEqual(rounds[0]["coordination_ms"], 15.0, places=0)
 
-    async def test_collect_snapshot_events_rejects_duplicate_broker_completion(
-        self,
-    ) -> None:
-        events: asyncio.Queue[dict] = asyncio.Queue()
-        for broker_id, ts in ((1, 10.0), (1, 10.1), (2, 10.2)):
-            events.put_nowait(
-                {
-                    "type": "snapshot_complete",
-                    "timestamp": ts,
-                    "data": {
-                        "broker_id": broker_id,
-                        "snapshot_id": "round-1",
-                        "snapshot_timestamp": ts,
-                    },
-                }
-            )
+    async def test_collect_snapshot_rounds_asserts_cl_invariant(self) -> None:
+        """Raises when brokers advance but report different snapshot_ids (CL invariant violation)."""
+        client = AsyncMock()
+        client.get_broker_snapshot_status.side_effect = [
+            # pre-flight: all have first snapshot — passes immediately, baseline set here
+            [
+                {"broker_id": 1, "timestamp": 1000.0, "snapshot_id": "solo-1", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": 1000.0, "snapshot_id": "solo-2", "snapshot_state": "idle"},
+                {"broker_id": 3, "timestamp": 1000.0, "snapshot_id": "solo-3", "snapshot_state": "idle"},
+            ],
+            # round 1 poll: all advance but still have different snapshot_ids
+            [
+                {"broker_id": 1, "timestamp": 1090.1, "snapshot_id": "snap-A", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": 1090.2, "snapshot_id": "snap-B", "snapshot_state": "idle"},
+                {"broker_id": 3, "timestamp": 1090.3, "snapshot_id": "snap-A", "snapshot_state": "idle"},
+            ],
+        ]
+        with patch("benchmarks.collectors.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "CL invariant violated"):
+                await collect_snapshot_rounds(client, rounds=1, expected_brokers=3)
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            (
-                "invalid snapshot round: snapshot round contains duplicate "
-                "broker completions"
-            ),
-        ):
-            await collect_snapshot_events(
-                events,
-                rounds=1,
-                timeout_per_round=0.01,
-                expected_brokers=3,
-            )
+    async def test_collect_snapshot_rounds_times_out_when_brokers_stall(self) -> None:
+        """Raises with broker count info when a broker never completes its first snapshot."""
+        client = AsyncMock()
+
+        async def _side_effect():
+            # Broker 3 never gets a first snapshot — pre-flight never passes.
+            return [
+                {"broker_id": 1, "timestamp": 1000.1, "snapshot_id": "snap-A", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": 1000.2, "snapshot_id": "snap-A", "snapshot_state": "idle"},
+                {"broker_id": 3, "timestamp": None, "snapshot_id": None, "snapshot_state": "idle"},
+            ]
+
+        client.get_broker_snapshot_status.side_effect = _side_effect
+        with patch("benchmarks.collectors.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, r"2/3 brokers completed"):
+                await collect_snapshot_rounds(
+                    client, rounds=1, expected_brokers=3, convergence_timeout=0.001
+                )
+
+    async def test_collect_snapshot_rounds_advances_baseline_between_rounds(self) -> None:
+        """Second round must advance past first round's timestamps, not the pre-flight baseline."""
+        client = AsyncMock()
+        client.get_broker_snapshot_status.side_effect = [
+            # pre-flight: all have first snapshot — passes immediately
+            [
+                {"broker_id": 1, "timestamp": 1000.0, "snapshot_id": "snap-0", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": 1000.1, "snapshot_id": "snap-0", "snapshot_state": "idle"},
+            ],
+            # round 1 poll: advance past pre-flight baseline
+            [
+                {"broker_id": 1, "timestamp": 1090.0, "snapshot_id": "snap-1", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": 1090.1, "snapshot_id": "snap-1", "snapshot_state": "idle"},
+            ],
+            # round 2 poll: must advance past round 1 timestamps (not pre-flight baseline)
+            [
+                {"broker_id": 1, "timestamp": 1180.0, "snapshot_id": "snap-2", "snapshot_state": "idle"},
+                {"broker_id": 2, "timestamp": 1180.1, "snapshot_id": "snap-2", "snapshot_state": "idle"},
+            ],
+        ]
+        with patch("benchmarks.collectors.asyncio.sleep", new=AsyncMock()):
+            rounds = await collect_snapshot_rounds(client, rounds=2, expected_brokers=2)
+
+        self.assertEqual(len(rounds), 2)
+        self.assertEqual(rounds[0]["snapshot_id"], "snap-1")
+        self.assertEqual(rounds[1]["snapshot_id"], "snap-2")
 
     async def test_collect_recovery_events_rejects_out_of_order_timeline(self) -> None:
         events: asyncio.Queue[dict] = asyncio.Queue()
@@ -282,26 +297,3 @@ class TestEventCollectors(unittest.IsolatedAsyncioTestCase):
             await collect_recovery_events(events, timeout=0.05)
 
 
-class TestClassifySnapshotRound(unittest.TestCase):
-    def test_rejects_mixed_snapshot_ids(self) -> None:
-        reason = classify_snapshot_round(
-            [
-                {
-                    "data": {
-                        "broker_id": 1,
-                        "snapshot_id": "round-1",
-                        "snapshot_timestamp": 10.0,
-                    }
-                },
-                {
-                    "data": {
-                        "broker_id": 2,
-                        "snapshot_id": "round-2",
-                        "snapshot_timestamp": 10.1,
-                    }
-                },
-            ],
-            expected_brokers=2,
-        )
-
-        self.assertIn("mixed snapshot ids", reason)

@@ -39,9 +39,7 @@ async def _event_stream_with_queue(
 
 
 class TestSnapshotPhase6(unittest.IsolatedAsyncioTestCase):
-    async def test_run_records_invalid_result_for_incoherent_snapshot_round(
-        self,
-    ) -> None:
+    async def test_run_records_invalid_result_when_rounds_fail(self) -> None:
         from benchmarks import snapshot
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -52,20 +50,14 @@ class TestSnapshotPhase6(unittest.IsolatedAsyncioTestCase):
                 results_dir=Path(tmpdir),
             )
             client = _fake_client()
-            events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
             with (
                 patch("benchmarks.snapshot.AetherClient", return_value=client),
                 patch(
-                    "benchmarks.snapshot.event_stream",
-                    return_value=_event_stream_with_queue(events),
-                ),
-                patch(
-                    "benchmarks.snapshot.collect_snapshot_events",
+                    "benchmarks.snapshot.collect_snapshot_rounds",
                     new=AsyncMock(
                         side_effect=RuntimeError(
-                            "invalid snapshot round: "
-                            "snapshot round expected 3 brokers, got 2"
+                            "snapshot round 1 timed out: 2/3 brokers completed within 120s"
                         )
                     ),
                 ),
@@ -75,7 +67,7 @@ class TestSnapshotPhase6(unittest.IsolatedAsyncioTestCase):
 
         result = output["results"][0]
         self.assertEqual(result["status"], "invalid")
-        self.assertIn("expected 3 brokers, got 2", result["invalid_reason"])
+        self.assertIn("timed out", result["invalid_reason"])
 
 
 class TestRecoveryPhase6(unittest.IsolatedAsyncioTestCase):

@@ -53,6 +53,10 @@ logger = BoundLogger(
     logging.getLogger(__name__),
     {"service_name": "aether-orchestrator", "component_type": "orchestrator"},
 )
+snapshot_monitor_log = BoundLogger(
+    logging.getLogger(f"{__name__}.snapshot_monitor"),
+    {"service_name": "aether-orchestrator", "component_type": "snapshot_monitor"},
+)
 
 app = FastAPI(title="Aether Control Plane")
 app.add_middleware(
@@ -230,6 +234,13 @@ async def get_snapshots() -> SnapshotsResponse:
     return await loop.run_in_executor(None, docker_mgr.get_snapshots)
 
 
+@app.get("/api/broker-snapshot-status")
+async def get_broker_snapshot_status():
+    """Per-broker self-reported latest_snapshot. O(N) — used by the snapshot benchmark."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, docker_mgr.get_broker_snapshot_summaries)
+
+
 # ---------------------------------------------------------------------------
 # Demo seed
 # ---------------------------------------------------------------------------
@@ -368,6 +379,7 @@ async def _snapshot_monitor() -> None:
         ]
 
     # Seed baseline so pre-existing snapshots are not treated as new on startup.
+    seeded = 0
     for info in _running_brokers():
         try:
             raw = await loop.run_in_executor(
@@ -379,8 +391,22 @@ async def _snapshot_monitor() -> None:
             snap = raw.get("latest_snapshot")
             if snap and snap.get("timestamp"):
                 last_timestamps[info.hostname] = snap["timestamp"]
+                seeded += 1
+                snapshot_monitor_log.debug(
+                    "seeded baseline broker=%s snapshot_id=%s ts=%f",
+                    info.hostname,
+                    snap["snapshot_id"][:8],
+                    snap["timestamp"],
+                )
         except Exception:
-            pass
+            snapshot_monitor_log.debug(
+                "failed to seed baseline for broker=%s", info.hostname, exc_info=True
+            )
+    snapshot_monitor_log.debug(
+        "snapshot monitor started seeded=%d/%d brokers",
+        seeded,
+        len(_running_brokers()),
+    )
 
     while True:
         await asyncio.sleep(settings.snapshot_monitor_poll_interval)
@@ -394,12 +420,23 @@ async def _snapshot_monitor() -> None:
                 )
                 snap = raw.get("latest_snapshot")
                 if not snap or not snap.get("timestamp"):
+                    snapshot_monitor_log.debug(
+                        "no latest_snapshot from broker=%s (not yet run)", info.hostname
+                    )
                     continue
 
                 ts = snap["timestamp"]
                 prev = last_timestamps.get(info.hostname)
                 if prev is None or ts > prev:
                     last_timestamps[info.hostname] = ts
+                    snapshot_monitor_log.debug(
+                        "new snapshot detected broker=%s snapshot_id=%s ts=%f prev_ts=%s"
+                        " — emitting SNAPSHOT_COMPLETE",
+                        info.hostname,
+                        snap["snapshot_id"][:8],
+                        ts,
+                        f"{prev:.3f}" if prev is not None else "none",
+                    )
                     await broadcaster.emit(
                         EventType.SNAPSHOT_COMPLETE,
                         {
@@ -409,8 +446,17 @@ async def _snapshot_monitor() -> None:
                             "snapshot_timestamp": ts,
                         },
                     )
+                else:
+                    snapshot_monitor_log.debug(
+                        "no new snapshot broker=%s snapshot_id=%s ts=%f (unchanged)",
+                        info.hostname,
+                        snap["snapshot_id"][:8],
+                        ts,
+                    )
             except Exception:
-                pass
+                snapshot_monitor_log.debug(
+                    "failed to poll /status for broker=%s", info.hostname, exc_info=True
+                )
 
 
 async def _metrics_updater() -> None:

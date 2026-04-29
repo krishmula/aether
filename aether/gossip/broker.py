@@ -329,7 +329,7 @@ class GossipBroker:
         """
         with self._lock:
             if self._snapshot_in_progress is not None:
-                self.log.debug(
+                self.snapshot_log.debug(
                     "snapshot already in progress snapshot_id=%s, skipping",
                     self._snapshot_in_progress[:8],
                 )
@@ -454,6 +454,10 @@ class GossipBroker:
         if self._channels_closed >= expected_peers:
             snapshot = self._snapshot_recorded_state
             if snapshot is None:
+                self.snapshot_log.debug(
+                    "check_snapshot_complete: all channels closed but recorded state is None"
+                    " — likely cleared by concurrent timeout"
+                )
                 return
 
             self._latest_local_snapshot = snapshot
@@ -593,21 +597,32 @@ class GossipBroker:
                 self._check_snapshot_timeout()
 
             with self._lock:
+                peer_count = len(self.peer_brokers)
                 if not self.peer_brokers:
                     should_initiate = True
+                    leader_addr = None
                 else:
                     all_addresses = self.peer_brokers | {self.address}
                     sorted_addresses = sorted(
                         all_addresses, key=lambda a: (a.host, a.port)
                     )
-                    should_initiate = sorted_addresses[0] == self.address
+                    leader_addr = sorted_addresses[0]
+                    should_initiate = leader_addr == self.address
 
+            mode = "solo" if peer_count == 0 else "coordinated"
             if should_initiate:
-                self.snapshot_log.debug("snapshot timer fired, initiating as leader")
+                self.snapshot_log.debug(
+                    "snapshot timer fired mode=%s peer_count=%d — initiating",
+                    mode,
+                    peer_count,
+                )
                 self.initiate_snapshot()
             else:
                 self.snapshot_log.debug(
-                    "snapshot timer fired, not leader — awaiting marker"
+                    "snapshot timer fired mode=%s peer_count=%d leader=%s — awaiting marker",
+                    mode,
+                    peer_count,
+                    leader_addr,
                 )
 
     def _handle_snapshot_request(

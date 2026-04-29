@@ -176,6 +176,12 @@ class AetherClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_broker_snapshot_status(self) -> list[dict[str, Any]]:
+        """Fetch each broker's self-reported latest_snapshot. O(N) per call."""
+        resp = await self._http.get("/api/broker-snapshot-status")
+        resp.raise_for_status()
+        return resp.json()
+
     def assert_valid_metrics_snapshot(
         self,
         metrics: dict[str, Any],

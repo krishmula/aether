@@ -225,6 +225,116 @@ def _compute_percentiles(sorted_values: list[float]) -> dict[str, float]:
     }
 
 
+async def collect_snapshot_rounds(
+    client: Any,
+    rounds: int,
+    expected_brokers: int,
+    *,
+    poll_interval: float = 2.0,
+    convergence_timeout: float = 120.0,
+) -> list[dict[str, Any]]:
+    """Poll broker /status directly to measure Chandy-Lamport coordination overhead.
+
+    Pre-flight: wait until all expected_brokers have completed at least one
+    snapshot.  This absorbs the startup race where the snapshot timer fires
+    before gossip has converged (each broker initiates solo, producing N
+    distinct snapshot_ids).  Only after every broker has a non-None timestamp
+    do we baseline and start counting measured rounds.
+
+    For each round: poll until all expected_brokers advance past their
+    baseline, assert the CL invariant (all brokers share a single
+    snapshot_id), then record coordination_ms.
+    """
+    # Pre-flight: wait for all expected_brokers to have completed at least one
+    # snapshot (any UUID — coordinated or solo doesn't matter here).
+    preflight_deadline = asyncio.get_event_loop().time() + convergence_timeout
+    initial: list[dict[str, Any]] = []
+    while asyncio.get_event_loop().time() < preflight_deadline:
+        initial = await client.get_broker_snapshot_status()
+        ready = [b for b in initial if b["timestamp"] is not None]
+        if len(ready) >= expected_brokers:
+            break
+        await asyncio.sleep(poll_interval)
+    else:
+        have = sum(1 for b in initial if b["timestamp"] is not None)
+        raise RuntimeError(
+            f"pre-flight failed: {have}/{expected_brokers} brokers completed "
+            f"a first snapshot within {convergence_timeout:.0f}s"
+        )
+
+    baselines: dict[int, float | None] = {
+        b["broker_id"]: b["timestamp"] for b in initial
+    }
+
+    results: list[dict[str, Any]] = []
+
+    for round_num in range(rounds):
+        deadline = asyncio.get_event_loop().time() + convergence_timeout
+        current: list[dict[str, Any]] = []
+        completed: set[int] = set()
+
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(poll_interval)
+            current = await client.get_broker_snapshot_status()
+
+            current_by_id = {b["broker_id"]: b for b in current}
+            if len(current_by_id) < expected_brokers:
+                continue
+
+            completed = {
+                bid
+                for bid in current_by_id
+                if bid in baselines
+                and current_by_id[bid]["timestamp"] is not None
+                and (
+                    baselines[bid] is None
+                    or current_by_id[bid]["timestamp"] > baselines[bid]
+                )
+            }
+            if len(completed) >= expected_brokers:
+                break
+        else:
+            raise RuntimeError(
+                f"snapshot round {round_num + 1} timed out: "
+                f"{len(completed)}/{expected_brokers} brokers completed "
+                f"within {convergence_timeout:.0f}s"
+            )
+
+        current_by_id = {b["broker_id"]: b for b in current}
+
+        # Assert the CL global snapshot invariant: one snapshot_id for the round.
+        snapshot_ids = {
+            current_by_id[bid]["snapshot_id"]
+            for bid in completed
+            if current_by_id[bid]["snapshot_id"] is not None
+        }
+        if len(snapshot_ids) != 1:
+            raise RuntimeError(
+                f"CL invariant violated in round {round_num + 1}: "
+                f"expected 1 snapshot_id across {expected_brokers} brokers, "
+                f"got {len(snapshot_ids)}: {sorted(snapshot_ids)}"
+            )
+
+        timestamps = [current_by_id[bid]["timestamp"] for bid in completed]
+        coordination_ms = round((max(timestamps) - min(timestamps)) * 1000, 1)
+
+        results.append(
+            {
+                "snapshot_id": next(iter(snapshot_ids)),
+                "broker_ids": sorted(completed),
+                "broker_count": len(completed),
+                "coordination_ms": coordination_ms,
+                "broker_timestamps": {
+                    bid: current_by_id[bid]["timestamp"] for bid in sorted(completed)
+                },
+            }
+        )
+
+        baselines = {b["broker_id"]: b["timestamp"] for b in current}
+
+    return results
+
+
 async def collect_recovery_events(
     events: asyncio.Queue[dict[str, Any]],
     timeout: float = 60.0,
@@ -333,174 +443,3 @@ async def collect_recovery_events(
         )
 
     return result
-
-
-async def collect_snapshot_events(
-    events: asyncio.Queue[dict[str, Any]],
-    rounds: int = 3,
-    timeout_per_round: float = 30.0,
-    expected_brokers: int | None = None,
-) -> list[dict[str, Any]]:
-    """Capture SNAPSHOT_COMPLETE events and measure coordination overhead.
-
-    Returns per-round timing: time between first and last broker completing.
-    """
-    results: list[dict[str, Any]] = []
-    round_events: list[dict[str, Any]] = []
-    current_snapshot_id: str | None = None
-
-    while len(results) < rounds:
-        try:
-            event = await asyncio.wait_for(events.get(), timeout=timeout_per_round)
-        except asyncio.TimeoutError:
-            if round_events:
-                _append_snapshot_round(
-                    results,
-                    round_events,
-                    expected_brokers=expected_brokers,
-                )
-                round_events = []
-            break
-
-        if event.get("type") != "snapshot_complete":
-            continue
-
-        snapshot_id = str(event.get("data", {}).get("snapshot_id") or "")
-        if current_snapshot_id is None:
-            current_snapshot_id = snapshot_id
-        elif snapshot_id != current_snapshot_id:
-            _append_snapshot_round(
-                results,
-                round_events,
-                expected_brokers=expected_brokers,
-            )
-            round_events = []
-            current_snapshot_id = snapshot_id
-
-        round_events.append(event)
-
-    if round_events and len(results) < rounds:
-        _append_snapshot_round(
-            results,
-            round_events,
-            expected_brokers=expected_brokers,
-        )
-
-    if len(results) < rounds:
-        raise RuntimeError(
-            "incomplete snapshot rounds: "
-            f"expected {rounds}, got {len(results)}"
-        )
-
-    return results
-
-
-def classify_snapshot_round(
-    events: list[dict[str, Any]],
-    *,
-    expected_brokers: int | None,
-) -> str | None:
-    """Return an explicit invalidity reason when a snapshot round is not coherent."""
-    if not events:
-        return "snapshot round was empty"
-
-    snapshot_ids = {
-        str(event.get("data", {}).get("snapshot_id") or "") for event in events
-    }
-    if "" in snapshot_ids:
-        return "snapshot round missing snapshot_id"
-    if len(snapshot_ids) != 1:
-        return (
-            "snapshot round mixed snapshot ids: "
-            + ", ".join(sorted(snapshot_ids))
-        )
-
-    broker_ids = [event.get("data", {}).get("broker_id") for event in events]
-    if any(broker_id is None for broker_id in broker_ids):
-        return "snapshot round missing broker_id"
-
-    unique_broker_ids = {int(broker_id) for broker_id in broker_ids}
-    if len(unique_broker_ids) != len(broker_ids):
-        return "snapshot round contains duplicate broker completions"
-    if expected_brokers is not None and len(unique_broker_ids) != expected_brokers:
-        return (
-            f"snapshot round expected {expected_brokers} brokers, got "
-            f"{len(unique_broker_ids)}"
-        )
-
-    missing_timestamps = [
-        str(int(broker_id))
-        for broker_id, event in zip(broker_ids, events, strict=True)
-        if float(event.get("data", {}).get("snapshot_timestamp") or 0) <= 0
-    ]
-    if missing_timestamps:
-        return (
-            "snapshot round missing snapshot_timestamp for brokers "
-            + ", ".join(missing_timestamps)
-        )
-
-    return None
-
-
-def _summarize_snapshot_round(events: list[dict[str, Any]]) -> dict[str, Any]:
-    # Use each broker's own snapshot_timestamp (when it actually completed the
-    # snapshot) rather than the WebSocket event's timestamp (when the orchestrator
-    # emitted the event). The orchestrator emits all events in the same for-loop
-    # so event timestamps are indistinguishable; broker timestamps reflect real
-    # per-broker completion times.
-    timestamps = [float(e.get("data", {}).get("snapshot_timestamp", 0)) for e in events]
-    if not timestamps:
-        return {"broker_count": 0, "coordination_ms": 0}
-    return {
-        "snapshot_id": events[0].get("data", {}).get("snapshot_id"),
-        "broker_ids": sorted(
-            int(e.get("data", {}).get("broker_id")) for e in events
-        ),
-        "broker_count": len(events),
-        "coordination_ms": round((max(timestamps) - min(timestamps)) * 1000, 1),
-    }
-
-
-def _append_snapshot_round(
-    results: list[dict[str, Any]],
-    round_events: list[dict[str, Any]],
-    *,
-    expected_brokers: int | None,
-) -> None:
-    reason = classify_snapshot_round(
-        round_events,
-        expected_brokers=expected_brokers,
-    )
-    if reason is None:
-        results.append(_summarize_snapshot_round(round_events))
-        return
-
-    if _can_skip_initial_partial_snapshot_round(
-        results,
-        round_events,
-        expected_brokers=expected_brokers,
-    ):
-        return
-
-    raise RuntimeError("invalid snapshot round: " + reason)
-
-
-def _can_skip_initial_partial_snapshot_round(
-    results: list[dict[str, Any]],
-    round_events: list[dict[str, Any]],
-    *,
-    expected_brokers: int | None,
-) -> bool:
-    """Allow the very first observed round to be partial if we attached mid-cycle."""
-    if results or expected_brokers is None:
-        return False
-
-    broker_ids = [event.get("data", {}).get("broker_id") for event in round_events]
-    if any(broker_id is None for broker_id in broker_ids):
-        return False
-
-    unique_broker_ids = {int(broker_id) for broker_id in broker_ids}
-    return (
-        0 < len(unique_broker_ids) < expected_brokers
-        and len(unique_broker_ids) == len(broker_ids)
-    )

@@ -85,7 +85,7 @@ class DockerManager:
             settings.aether_image,
             command=(
                 f"aether-broker --broker-id {broker_id} --host {hostname} "
-                f"--port {internal_port} --status-port {internal_status_port}"
+                f"--port {internal_port} --status-port {internal_status_port} --log-level DEBUG"
             ),
             name=container_name,
             hostname=hostname,
@@ -621,3 +621,32 @@ class DockerManager:
                 )
 
         return SnapshotsResponse(brokers=results, fetched_at=fetched_at)
+
+    def get_broker_snapshot_summaries(self) -> list[dict]:
+        """Return each running broker's self-reported latest_snapshot.
+
+        O(N) — one direct /status call per broker, using the broker's own
+        _latest_local_snapshot timestamp.  Used by the snapshot benchmark to
+        measure coordination spread without the N² peer-query overhead of
+        get_snapshots().
+        """
+        brokers = [
+            info
+            for info in self._components.values()
+            if info.component_type == ComponentType.BROKER
+            and info.status == ComponentStatus.RUNNING
+        ]
+        out = []
+        for info in brokers:
+            raw = self._fetch_status(info.hostname, info.internal_status_port)
+            snap = raw.get("latest_snapshot")
+            out.append(
+                {
+                    "broker_id": info.component_id,
+                    "hostname": info.hostname,
+                    "snapshot_id": snap["snapshot_id"] if snap else None,
+                    "timestamp": snap["timestamp"] if snap else None,
+                    "snapshot_state": raw.get("snapshot_state", "unknown"),
+                }
+            )
+        return out

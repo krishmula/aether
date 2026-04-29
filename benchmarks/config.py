@@ -62,12 +62,11 @@ class BenchmarkConfig:
     # Snapshot benchmark
     snapshot_broker_counts: list[int] = field(default_factory=lambda: [3, 5, 7, 10])
     snapshot_rounds: int = 2
-    # Must exceed snapshot_interval (90s) + container/process startup time.
-    # With up to ~40s for the Python process to initialize inside Docker,
-    # the first snapshot can arrive up to ~135s after containers are created.
-    # Collection starts ~12s after containers are created, so the worst-case
-    # wait from collection start is ~123s — use 240s to give ample headroom.
-    snapshot_timeout_per_round: float = 240.0
+    snapshot_poll_interval: float = 2.0
+    # Pre-flight waits for first snapshot per broker (up to 90s from process
+    # start under Docker load). Each measured round waits up to one full
+    # snapshot_interval (90s). 200s covers both phases with headroom.
+    snapshot_convergence_timeout: float = 200.0
 
     # Recovery benchmark
     recovery_trials: int = 5

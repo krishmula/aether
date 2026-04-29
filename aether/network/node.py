@@ -70,6 +70,8 @@ class NetworkNode:
         self._connections: Dict[NodeAddress, socket.socket] = {}
         self._connections_lock = threading.Lock()
 
+        self._send_lock = threading.Lock()
+
         self._message_queue: deque = deque()
         self._queue_lock = threading.Lock()
         self._queue_condition = threading.Condition(self._queue_lock)
@@ -168,6 +170,7 @@ class NetworkNode:
 
                 except Exception:
                     self.log.error("error unpickling message", exc_info=True)
+                    break
 
         except Exception:
             self.log.error("connection handler error", exc_info=True)
@@ -303,7 +306,11 @@ class NetworkNode:
                     peer_socket.connect((dest.host, dest.port))
 
                     id_msg = _IdentificationMessage(self.address)
-                    if not self._send_full_message(peer_socket, pickle.dumps(id_msg)):
+                    with self._send_lock:
+                        id_ok = self._send_full_message(
+                            peer_socket, pickle.dumps(id_msg)
+                        )
+                    if not id_ok:
                         peer_socket.close()
                         raise Exception("failed to send identification")
 
@@ -338,7 +345,10 @@ class NetworkNode:
                         )
                         return
 
-            if self._send_full_message(peer_socket, data):
+            with self._send_lock:
+                send_ok = self._send_full_message(peer_socket, data)
+
+            if send_ok:
                 self.log.debug("sent %s to %s", type(msg).__name__, dest)
                 return
             else:
@@ -380,6 +390,7 @@ class NetworkNode:
 
                 except Exception:
                     self.log.error("error unpickling message", exc_info=True)
+                    break
 
         except Exception:
             self.log.error("outbound handler error", exc_info=True)
